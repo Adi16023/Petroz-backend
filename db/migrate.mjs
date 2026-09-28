@@ -1,35 +1,53 @@
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import pg from "pg";
 import "dotenv/config";
-import { createPool } from "./pool.mjs";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const sql = fs.readFileSync(path.join(dir, "schema.sql"), "utf8");
 
-// Schema changes use the direct Neon host. The app keeps the pooled URL in DATABASE_URL.
-if (process.env.DATABASE_URL?.includes("-pooler.")) {
-  process.env.DATABASE_URL = process.env.DATABASE_URL.replace("-pooler.", ".");
+function directUrl(url) {
+  if (!url) throw new Error("DATABASE_URL is not set.");
+  return url.includes("-pooler.") ? url.replace("-pooler.", ".") : url;
 }
 
-const pool = createPool();
-const client = await pool.connect();
-try {
-  await client.query("BEGIN");
-  await client.query(sql);
-  await client.query("COMMIT");
-  const { rows } = await client.query(
-    `SELECT tablename
-     FROM pg_tables
-     WHERE schemaname = 'public'
-     ORDER BY tablename`,
-  );
-  console.log(rows.map((row) => row.tablename).join("\n"));
-} catch (error) {
-  await client.query("ROLLBACK");
-  console.error(error.message);
-  process.exitCode = 1;
-} finally {
-  client.release();
-  await pool.end();
+export async function migrate() {
+  const pool = new pg.Pool({
+    connectionString: directUrl(process.env.DATABASE_URL),
+    ssl: { rejectUnauthorized: false },
+    max: 1,
+  });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    await client.query(sql);
+    await client.query("COMMIT");
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+const isCli = process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+if (isCli) {
+  try {
+    await migrate();
+    const pool = new pg.Pool({
+      connectionString: directUrl(process.env.DATABASE_URL),
+      ssl: { rejectUnauthorized: false },
+      max: 1,
+    });
+    const { rows } = await pool.query(
+      `SELECT tablename FROM pg_tables WHERE schemaname = 'public' ORDER BY tablename`,
+    );
+    console.log(rows.map((row) => row.tablename).join("\n"));
+    await pool.end();
+  } catch (error) {
+    console.error(error.message);
+    process.exitCode = 1;
+  }
 }
