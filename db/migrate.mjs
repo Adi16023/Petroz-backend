@@ -7,9 +7,9 @@ import { createPool } from "./pool.mjs";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const sql = fs.readFileSync(path.join(dir, "schema.sql"), "utf8");
 
-if (process.env.DATABASE_URL?.includes("-pooler")) {
-  console.error("Use the Neon direct connection string for schema changes, not the pooled URL.");
-  process.exit(1);
+// Schema changes use the direct Neon host. The app keeps the pooled URL in DATABASE_URL.
+if (process.env.DATABASE_URL?.includes("-pooler.")) {
+  process.env.DATABASE_URL = process.env.DATABASE_URL.replace("-pooler.", ".");
 }
 
 const pool = createPool();
