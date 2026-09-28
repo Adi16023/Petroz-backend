@@ -1,0 +1,13 @@
+{
+  "name": "petroz-backend",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "db:migrate": "node db/migrate.mjs",
+    "db:check": "node db/check.mjs"
+  },
+  "dependencies": {
+    "dotenv": "^16.6.1",
+    "pg": "^8.16.3"
+  }
+}
