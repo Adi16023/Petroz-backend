@@ -208,3 +208,195 @@ BEGIN
     DROP TYPE document_kind_old;
   END IF;
 END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'sale_lines')
+     AND NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'sale_items') THEN
+    ALTER TABLE sale_lines RENAME TO sale_items;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'users')
+     AND NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'purchases') THEN
+    CREATE TABLE purchases (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      outlet_id uuid NOT NULL REFERENCES outlets (id),
+      user_id uuid REFERENCES users (id),
+      shift_id uuid REFERENCES shifts (id),
+      kind text NOT NULL,
+      status text NOT NULL DEFAULT 'open',
+      doc_no text,
+      doc_date date NOT NULL DEFAULT CURRENT_DATE,
+      due_date date,
+      amount numeric(14, 2) NOT NULL DEFAULT 0,
+      tax numeric(14, 2) NOT NULL DEFAULT 0,
+      charges numeric(14, 2) NOT NULL DEFAULT 0,
+      net numeric(14, 2) NOT NULL DEFAULT 0,
+      mode pay_mode,
+      category text,
+      reference text,
+      note text,
+      created_by uuid REFERENCES users (id),
+      decided_by uuid REFERENCES users (id),
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE purchase_items (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      purchase_id uuid NOT NULL REFERENCES purchases (id),
+      product_id uuid REFERENCES products (id),
+      equipment_id uuid REFERENCES equipment (id),
+      description text,
+      qty numeric(14, 3) NOT NULL DEFAULT 0,
+      rate numeric(14, 4) NOT NULL DEFAULT 0,
+      amount numeric(14, 2) NOT NULL DEFAULT 0,
+      qty_received numeric(14, 3)
+    );
+    CREATE TABLE banking (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      outlet_id uuid NOT NULL REFERENCES outlets (id),
+      user_id uuid REFERENCES users (id),
+      counterparty_id uuid REFERENCES users (id),
+      shift_id uuid REFERENCES shifts (id),
+      kind text NOT NULL,
+      status text NOT NULL DEFAULT 'open',
+      doc_no text,
+      doc_date date NOT NULL DEFAULT CURRENT_DATE,
+      amount numeric(14, 2) NOT NULL DEFAULT 0,
+      tax numeric(14, 2) NOT NULL DEFAULT 0,
+      charges numeric(14, 2) NOT NULL DEFAULT 0,
+      net numeric(14, 2) NOT NULL DEFAULT 0,
+      mode pay_mode,
+      category text,
+      reference text,
+      note text,
+      created_by uuid REFERENCES users (id),
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE expenses (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      outlet_id uuid NOT NULL REFERENCES outlets (id),
+      user_id uuid REFERENCES users (id),
+      shift_id uuid REFERENCES shifts (id),
+      kind text NOT NULL,
+      status text NOT NULL DEFAULT 'open',
+      doc_no text,
+      doc_date date NOT NULL DEFAULT CURRENT_DATE,
+      due_date date,
+      amount numeric(14, 2) NOT NULL DEFAULT 0,
+      tax numeric(14, 2) NOT NULL DEFAULT 0,
+      charges numeric(14, 2) NOT NULL DEFAULT 0,
+      net numeric(14, 2) NOT NULL DEFAULT 0,
+      mode pay_mode,
+      category text,
+      note text,
+      frequency text,
+      next_due date,
+      reimbursable boolean NOT NULL DEFAULT false,
+      deduct_from_shift_cash boolean NOT NULL DEFAULT false,
+      attachment text,
+      created_by uuid REFERENCES users (id),
+      decided_by uuid REFERENCES users (id),
+      created_at timestamptz NOT NULL DEFAULT now()
+    );
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (
+    SELECT 1 FROM pg_enum e
+    JOIN pg_type t ON t.oid = e.enumtypid
+    WHERE t.typname = 'document_kind' AND e.enumlabel = 'purchase'
+  ) THEN
+    INSERT INTO purchases (
+      id, outlet_id, user_id, shift_id, kind, status, doc_no, doc_date, due_date,
+      amount, tax, charges, net, mode, category, reference, note, created_by, decided_by, created_at
+    )
+    SELECT
+      id, outlet_id, user_id, shift_id, kind::text, status, doc_no, doc_date, due_date,
+      amount, tax, charges, net, mode, category, reference, note, created_by, decided_by, created_at
+    FROM documents
+    WHERE kind IN ('purchase', 'purchase_order')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO purchase_items (id, purchase_id, product_id, equipment_id, description, qty, rate, amount, qty_received)
+    SELECT l.id, l.document_id, l.product_id, l.equipment_id, l.description, l.qty, l.rate, l.amount, l.qty_received
+    FROM document_lines l
+    JOIN documents d ON d.id = l.document_id
+    WHERE d.kind IN ('purchase', 'purchase_order')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO banking (
+      id, outlet_id, user_id, counterparty_id, shift_id, kind, status, doc_no, doc_date,
+      amount, tax, charges, net, mode, category, reference, note, created_by, created_at
+    )
+    SELECT
+      id, outlet_id, user_id, counterparty_id, shift_id,
+      CASE WHEN kind = 'receipt' THEN 'deposit' ELSE kind::text END,
+      status, doc_no, doc_date, amount, tax, charges, net, mode,
+      CASE WHEN kind = 'receipt' THEN 'cash_deposit' ELSE category END,
+      reference, note, created_by, created_at
+    FROM documents
+    WHERE kind IN ('transfer', 'settlement')
+       OR (kind = 'receipt' AND category = 'cash_deposit')
+    ON CONFLICT (id) DO NOTHING;
+
+    INSERT INTO expenses (
+      id, outlet_id, user_id, shift_id, kind, status, doc_no, doc_date, due_date,
+      amount, tax, charges, net, mode, category, note, frequency, next_due,
+      reimbursable, deduct_from_shift_cash, attachment, created_by, decided_by, created_at
+    )
+    SELECT
+      id, outlet_id, user_id, shift_id, kind::text, status, doc_no, doc_date, due_date,
+      amount, tax, charges, net, mode, category, note, frequency, next_due,
+      reimbursable, deduct_from_shift_cash, attachment, created_by, decided_by, created_at
+    FROM documents
+    WHERE kind IN ('expense', 'expense_schedule')
+    ON CONFLICT (id) DO NOTHING;
+
+    UPDATE documents
+    SET parent_id = NULL
+    WHERE parent_id IN (
+      SELECT id FROM documents
+      WHERE kind IN ('purchase', 'purchase_order', 'transfer', 'settlement', 'expense', 'expense_schedule')
+         OR (kind = 'receipt' AND category = 'cash_deposit')
+    );
+
+    DELETE FROM document_lines
+    WHERE document_id IN (
+      SELECT id FROM documents
+      WHERE kind IN ('purchase', 'purchase_order', 'transfer', 'settlement', 'expense', 'expense_schedule')
+         OR (kind = 'receipt' AND category = 'cash_deposit')
+    );
+
+    DELETE FROM documents
+    WHERE kind IN ('purchase', 'purchase_order', 'transfer', 'settlement', 'expense', 'expense_schedule')
+       OR (kind = 'receipt' AND category = 'cash_deposit');
+
+    ALTER TYPE document_kind RENAME TO document_kind_old;
+    CREATE TYPE document_kind AS ENUM (
+      'quote',
+      'order',
+      'payment',
+      'receipt',
+      'salary',
+      'adjustment',
+      'dsr'
+    );
+    ALTER TABLE documents
+      ALTER COLUMN kind TYPE document_kind
+      USING kind::text::document_kind;
+    DROP TYPE document_kind_old;
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'document_lines')
+     AND NOT EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'document_items') THEN
+    ALTER TABLE document_lines RENAME TO document_items;
+  END IF;
+END $$;

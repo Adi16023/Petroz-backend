@@ -223,7 +223,7 @@ app.get("/api/notifications", wrap(async (req, res) => {
       [outlet.id],
     ),
     pool.query(
-      `SELECT * FROM documents WHERE outlet_id = $1 AND kind = 'expense' AND status = 'pending'`,
+      `SELECT * FROM expenses WHERE outlet_id = $1 AND kind = 'expense' AND status = 'pending'`,
       [outlet.id],
     ),
     pool.query(
@@ -238,13 +238,13 @@ app.get("/api/notifications", wrap(async (req, res) => {
     ),
     pool.query(
       `SELECT COALESCE(SUM(net), 0) AS deposited
-       FROM documents
-       WHERE outlet_id = $1 AND kind = 'receipt' AND category = 'cash_deposit'`,
+       FROM banking
+       WHERE outlet_id = $1 AND kind = 'deposit'`,
       [outlet.id],
     ),
     pool.query(
       `SELECT category, COALESCE(SUM(amount), 0) AS gross
-       FROM documents
+       FROM banking
        WHERE outlet_id = $1 AND kind = 'settlement' AND status = 'pending'
        GROUP BY category`,
       [outlet.id],
@@ -364,7 +364,7 @@ app.get("/api/dashboard", wrap(async (req, res) => {
   const sales = await pool.query(
     `SELECT s.net, s.mode, s.created_at, pr.kind AS product_kind, pr.name AS product_name
      FROM sales s
-     LEFT JOIN sale_lines l ON l.sale_id = s.id
+     LEFT JOIN sale_items l ON l.sale_id = s.id
      LEFT JOIN products pr ON pr.id = l.product_id
      WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
        AND s.shift_id IS NOT DISTINCT FROM $2::uuid`,
@@ -377,7 +377,7 @@ app.get("/api/dashboard", wrap(async (req, res) => {
             COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'cash'), 0) AS cash,
             COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'credit'), 0) AS credit
      FROM sales s
-     LEFT JOIN sale_lines l ON l.sale_id = s.id
+     LEFT JOIN sale_items l ON l.sale_id = s.id
      LEFT JOIN products pr ON pr.id = l.product_id
      WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
        AND s.doc_date = CURRENT_DATE - 1`,
@@ -442,15 +442,32 @@ app.get("/api/dsr", wrap(async (req, res) => {
   const docs = await pool.query(
     `SELECT d.kind::text AS kind, d.net, d.mode::text AS mode, d.category, d.status, pr.kind AS product_kind
      FROM documents d
-     LEFT JOIN document_lines l ON l.document_id = d.id
+     LEFT JOIN document_items l ON l.document_id = d.id
      LEFT JOIN products pr ON pr.id = l.product_id
      WHERE d.outlet_id = $1 AND d.doc_date = $2 AND d.status <> 'cancelled'
      UNION ALL
      SELECT 'sale', s.net, s.mode::text, s.category, s.status, pr.kind
      FROM sales s
-     LEFT JOIN sale_lines l ON l.sale_id = s.id
+     LEFT JOIN sale_items l ON l.sale_id = s.id
      LEFT JOIN products pr ON pr.id = l.product_id
-     WHERE s.outlet_id = $1 AND s.doc_date = $2 AND s.status <> 'cancelled'`,
+     WHERE s.outlet_id = $1 AND s.doc_date = $2 AND s.status <> 'cancelled'
+     UNION ALL
+     SELECT p.kind, p.net, p.mode::text, p.category, p.status, pr.kind
+     FROM purchases p
+     LEFT JOIN purchase_items l ON l.purchase_id = p.id
+     LEFT JOIN products pr ON pr.id = l.product_id
+     WHERE p.outlet_id = $1 AND p.doc_date = $2 AND p.status <> 'cancelled'
+     UNION ALL
+     SELECT e.kind, e.net, e.mode::text, e.category, e.status, NULL
+     FROM expenses e
+     WHERE e.outlet_id = $1 AND e.doc_date = $2 AND e.status <> 'cancelled'
+     UNION ALL
+     SELECT CASE WHEN b.kind = 'deposit' THEN 'receipt' ELSE b.kind END,
+            b.net, b.mode::text,
+            CASE WHEN b.kind = 'deposit' THEN 'cash_deposit' ELSE b.category END,
+            b.status, NULL
+     FROM banking b
+     WHERE b.outlet_id = $1 AND b.doc_date = $2 AND b.status <> 'cancelled'`,
     [outlet.id, date],
   );
   const shifts = await pool.query(
@@ -671,14 +688,19 @@ app.get("/api/products/:id", wrap(async (req, res) => {
     `SELECT id, kind, doc_no, doc_date, status, qty, amount, qty_received, created_at
      FROM (
        SELECT d.id, d.kind::text AS kind, d.doc_no, d.doc_date, d.status, l.qty, l.amount, l.qty_received, d.created_at
-       FROM document_lines l
+       FROM document_items l
        JOIN documents d ON d.id = l.document_id
        WHERE l.product_id = $1 AND d.outlet_id = $2
        UNION ALL
        SELECT s.id, 'sale', s.doc_no, s.doc_date, s.status, l.qty, l.amount, NULL, s.created_at
-       FROM sale_lines l
+       FROM sale_items l
        JOIN sales s ON s.id = l.sale_id
        WHERE l.product_id = $1 AND s.outlet_id = $2
+       UNION ALL
+       SELECT p.id, p.kind, p.doc_no, p.doc_date, p.status, l.qty, l.amount, l.qty_received, p.created_at
+       FROM purchase_items l
+       JOIN purchases p ON p.id = l.purchase_id
+       WHERE l.product_id = $1 AND p.outlet_id = $2
      ) movement
      ORDER BY doc_date DESC, created_at DESC`,
     [row.id, outlet.id],
@@ -815,7 +837,7 @@ const documentSelect = `
          )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
   FROM documents d
   LEFT JOIN users u ON u.id = d.user_id
-  LEFT JOIN document_lines l ON l.document_id = d.id
+  LEFT JOIN document_items l ON l.document_id = d.id
   LEFT JOIN products pr ON pr.id = l.product_id
 `;
 
@@ -834,9 +856,39 @@ const saleSelect = `
          )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
   FROM sales s
   LEFT JOIN users u ON u.id = s.user_id
-  LEFT JOIN sale_lines l ON l.sale_id = s.id
+  LEFT JOIN sale_items l ON l.sale_id = s.id
   LEFT JOIN products pr ON pr.id = l.product_id
 `;
+
+const purchaseSelect = `
+  SELECT p.*, p.user_id AS party_id, u.name AS party_name,
+         COALESCE(json_agg(json_build_object(
+           'id', l.id, 'product_id', l.product_id, 'product_name', pr.name,
+           'equipment_id', l.equipment_id, 'description', l.description,
+           'qty', l.qty, 'rate', l.rate, 'amount', l.amount, 'qty_received', l.qty_received
+         )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
+  FROM purchases p
+  LEFT JOIN users u ON u.id = p.user_id
+  LEFT JOIN purchase_items l ON l.purchase_id = p.id
+  LEFT JOIN products pr ON pr.id = l.product_id
+`;
+
+const expenseSelect = `
+  SELECT e.*, e.user_id AS party_id, u.name AS party_name, '[]'::json AS lines
+  FROM expenses e
+  LEFT JOIN users u ON u.id = e.user_id
+`;
+
+const bankingSelect = `
+  SELECT b.*, b.user_id AS party_id, u.name AS party_name, '[]'::json AS lines
+  FROM banking b
+  LEFT JOIN users u ON u.id = b.user_id
+`;
+
+function picked(kinds, allowed) {
+  if (!kinds) return null;
+  return kinds.filter((kind) => allowed.includes(kind));
+}
 
 app.get("/api/documents", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
@@ -844,10 +896,17 @@ app.get("/api/documents", wrap(async (req, res) => {
   if (kinds?.some((kind) => !DOCUMENT_KINDS.includes(kind))) throw bad("Unknown document kind.");
   const modes = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
   if (req.query.mode && !modes.includes(req.query.mode)) throw bad("Unknown payment mode.");
-  const documentKinds = kinds?.filter((kind) => kind !== "sale") ?? null;
-  const wantSales = !kinds || kinds.includes("sale");
+  const documentKinds = picked(kinds, ["quote", "order", "payment", "receipt", "salary", "adjustment", "dsr"]);
+  const purchaseKinds = picked(kinds, ["purchase", "purchase_order"]);
+  const expenseKinds = picked(kinds, ["expense", "expense_schedule"]);
+  const bankingKinds = !kinds
+    ? null
+    : [
+        ...(kinds.includes("transfer") ? ["transfer"] : []),
+        ...(kinds.includes("settlement") ? ["settlement"] : []),
+        ...(kinds.includes("receipt") ? ["deposit"] : []),
+      ];
   const filters = [
-    outlet.id,
     req.query.partyId || null,
     req.query.shiftId || null,
     req.query.from || null,
@@ -855,8 +914,8 @@ app.get("/api/documents", wrap(async (req, res) => {
     req.query.category || null,
     req.query.mode || null,
   ];
-  const [docs, sales] = await Promise.all([
-    !kinds || documentKinds?.length
+  const [docs, sales, purchases, expenses, banking] = await Promise.all([
+    !kinds || documentKinds.length
       ? pool.query(
           `${documentSelect}
            WHERE d.outlet_id = $1
@@ -867,12 +926,11 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($6::date IS NULL OR d.doc_date <= $6::date)
              AND ($7::text IS NULL OR d.category = $7)
              AND ($8::pay_mode IS NULL OR d.mode = $8::pay_mode)
-           GROUP BY d.id, u.name
-           ORDER BY d.doc_date DESC, d.created_at DESC`,
-          [outlet.id, documentKinds, ...filters.slice(1)],
+           GROUP BY d.id, u.name`,
+          [outlet.id, documentKinds, ...filters],
         )
       : Promise.resolve({ rows: [] }),
-    wantSales
+    !kinds || kinds.includes("sale")
       ? pool.query(
           `${saleSelect}
            WHERE s.outlet_id = $1
@@ -883,31 +941,97 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($6::text IS NULL OR s.category = $6)
              AND ($7::pay_mode IS NULL OR s.mode = $7::pay_mode)
            GROUP BY s.id, u.name`,
-          filters,
+          [outlet.id, ...filters],
+        )
+      : Promise.resolve({ rows: [] }),
+    !kinds || purchaseKinds.length
+      ? pool.query(
+          `${purchaseSelect}
+           WHERE p.outlet_id = $1
+             AND ($2::text[] IS NULL OR p.kind = ANY($2::text[]))
+             AND ($3::uuid IS NULL OR p.user_id = $3::uuid)
+             AND ($4::uuid IS NULL OR p.shift_id = $4::uuid)
+             AND ($5::date IS NULL OR p.doc_date >= $5::date)
+             AND ($6::date IS NULL OR p.doc_date <= $6::date)
+             AND ($7::text IS NULL OR p.category = $7)
+             AND ($8::pay_mode IS NULL OR p.mode = $8::pay_mode)
+           GROUP BY p.id, u.name`,
+          [outlet.id, purchaseKinds, ...filters],
+        )
+      : Promise.resolve({ rows: [] }),
+    !kinds || expenseKinds.length
+      ? pool.query(
+          `${expenseSelect}
+           WHERE e.outlet_id = $1
+             AND ($2::text[] IS NULL OR e.kind = ANY($2::text[]))
+             AND ($3::uuid IS NULL OR e.user_id = $3::uuid)
+             AND ($4::uuid IS NULL OR e.shift_id = $4::uuid)
+             AND ($5::date IS NULL OR e.doc_date >= $5::date)
+             AND ($6::date IS NULL OR e.doc_date <= $6::date)
+             AND ($7::text IS NULL OR e.category = $7)
+             AND ($8::pay_mode IS NULL OR e.mode = $8::pay_mode)`,
+          [outlet.id, expenseKinds, ...filters],
+        )
+      : Promise.resolve({ rows: [] }),
+    !kinds || bankingKinds.length
+      ? pool.query(
+          `${bankingSelect}
+           WHERE b.outlet_id = $1
+             AND ($2::text[] IS NULL OR b.kind = ANY($2::text[]))
+             AND ($3::uuid IS NULL OR b.user_id = $3::uuid)
+             AND ($4::uuid IS NULL OR b.shift_id = $4::uuid)
+             AND ($5::date IS NULL OR b.doc_date >= $5::date)
+             AND ($6::date IS NULL OR b.doc_date <= $6::date)
+             AND ($7::text IS NULL OR b.category = $7)
+             AND ($8::pay_mode IS NULL OR b.mode = $8::pay_mode)`,
+          [outlet.id, bankingKinds, ...filters],
         )
       : Promise.resolve({ rows: [] }),
   ]);
-  const rows = [...docs.rows.map(documentDto), ...sales.rows.map((row) => documentDto({ ...row, kind: "sale" }))];
+  const rows = [
+    ...docs.rows.map(documentDto),
+    ...sales.rows.map((row) => documentDto({ ...row, kind: "sale" })),
+    ...purchases.rows.map(documentDto),
+    ...expenses.rows.map(documentDto),
+    ...banking.rows.map((row) => documentDto({
+      ...row,
+      kind: row.kind === "deposit" ? "receipt" : row.kind,
+      category: row.kind === "deposit" ? "cash_deposit" : row.category,
+    })),
+  ];
   rows.sort((a, b) => String(b.docDate).localeCompare(String(a.docDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
   res.json(rows);
 }));
 
 app.get("/api/documents/:id", wrap(async (req, res) => {
-  const docs = await pool.query(
-    `${documentSelect} WHERE d.id = $1 GROUP BY d.id, u.name`,
-    [req.params.id],
-  );
-  let row = docs.rows[0];
+  const docs = await pool.query(`${documentSelect} WHERE d.id = $1 GROUP BY d.id, u.name`, [req.params.id]);
+  let row = docs.rows[0] ? documentDto(docs.rows[0]) : null;
   if (!row) {
-    const sales = await pool.query(
-      `${saleSelect} WHERE s.id = $1 GROUP BY s.id, u.name`,
-      [req.params.id],
-    );
-    row = sales.rows[0] ? { ...sales.rows[0], kind: "sale" } : null;
+    const sales = await pool.query(`${saleSelect} WHERE s.id = $1 GROUP BY s.id, u.name`, [req.params.id]);
+    row = sales.rows[0] ? documentDto({ ...sales.rows[0], kind: "sale" }) : null;
+  }
+  if (!row) {
+    const purchases = await pool.query(`${purchaseSelect} WHERE p.id = $1 GROUP BY p.id, u.name`, [req.params.id]);
+    row = purchases.rows[0] ? documentDto(purchases.rows[0]) : null;
+  }
+  if (!row) {
+    const expenses = await pool.query(`${expenseSelect} WHERE e.id = $1`, [req.params.id]);
+    row = expenses.rows[0] ? documentDto(expenses.rows[0]) : null;
+  }
+  if (!row) {
+    const banking = await pool.query(`${bankingSelect} WHERE b.id = $1`, [req.params.id]);
+    const found = banking.rows[0];
+    row = found
+      ? documentDto({
+          ...found,
+          kind: found.kind === "deposit" ? "receipt" : found.kind,
+          category: found.kind === "deposit" ? "cash_deposit" : found.category,
+        })
+      : null;
   }
   if (!row) throw bad("Document not found.", 404);
-  await assertOutlet(pool, req.user, row.outlet_id);
-  res.json(documentDto(row));
+  await assertOutlet(pool, req.user, row.outletId);
+  res.json(row);
 }));
 
 app.get("/api/attendance", wrap(async (req, res) => {

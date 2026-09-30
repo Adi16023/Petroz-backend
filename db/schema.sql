@@ -6,7 +6,11 @@
 -- users.outlet_id is the one pump that person belongs to.
 -- NULL means every outlet under that settings row (owner, auditor, a shared supplier).
 -- shifts.duties is the people on that shift. One shift has many of them.
--- sales is forecourt and shop billing. documents is every other money record.
+-- sales is forecourt and shop billing. sale_items is each product on a bill.
+-- purchases and purchase_items are fuel and shop buying, including purchase orders.
+-- banking is deposits, supplier transfers, and card or wallet settlements.
+-- expenses is day-to-day costs and recurring bills.
+-- documents is what is left: quotes, orders, credit receipts, salary, adjustments, and a locked DSR.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
@@ -91,14 +95,8 @@ DO $$ BEGIN
   CREATE TYPE document_kind AS ENUM (
     'quote',
     'order',
-    'purchase_order',
-    'purchase',
     'payment',
     'receipt',
-    'transfer',
-    'settlement',
-    'expense',
-    'expense_schedule',
     'salary',
     'adjustment',
     'dsr'
@@ -276,7 +274,7 @@ CREATE TABLE IF NOT EXISTS sales (
   )
 );
 
-CREATE TABLE IF NOT EXISTS sale_lines (
+CREATE TABLE IF NOT EXISTS sale_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   sale_id uuid NOT NULL REFERENCES sales (id),
   product_id uuid REFERENCES products (id),
@@ -285,6 +283,114 @@ CREATE TABLE IF NOT EXISTS sale_lines (
   qty numeric(14, 3) NOT NULL DEFAULT 0,
   rate numeric(14, 4) NOT NULL DEFAULT 0,
   amount numeric(14, 2) NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS purchases (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  user_id uuid REFERENCES users (id),
+  shift_id uuid REFERENCES shifts (id),
+  kind text NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  doc_no text,
+  doc_date date NOT NULL DEFAULT CURRENT_DATE,
+  due_date date,
+  amount numeric(14, 2) NOT NULL DEFAULT 0,
+  tax numeric(14, 2) NOT NULL DEFAULT 0,
+  charges numeric(14, 2) NOT NULL DEFAULT 0,
+  net numeric(14, 2) NOT NULL DEFAULT 0,
+  mode pay_mode,
+  category text,
+  reference text,
+  note text,
+  created_by uuid REFERENCES users (id),
+  decided_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (kind IN ('purchase', 'purchase_order')),
+  CHECK (
+    status IN (
+      'draft', 'open', 'partial', 'approved', 'rejected', 'paid', 'pending',
+      'settled', 'difference', 'failed', 'reversed', 'cancelled', 'locked',
+      'sent', 'received', 'completed'
+    )
+  )
+);
+
+CREATE TABLE IF NOT EXISTS purchase_items (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  purchase_id uuid NOT NULL REFERENCES purchases (id),
+  product_id uuid REFERENCES products (id),
+  equipment_id uuid REFERENCES equipment (id),
+  description text,
+  qty numeric(14, 3) NOT NULL DEFAULT 0,
+  rate numeric(14, 4) NOT NULL DEFAULT 0,
+  amount numeric(14, 2) NOT NULL DEFAULT 0,
+  qty_received numeric(14, 3)
+);
+
+CREATE TABLE IF NOT EXISTS banking (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  user_id uuid REFERENCES users (id),
+  counterparty_id uuid REFERENCES users (id),
+  shift_id uuid REFERENCES shifts (id),
+  kind text NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  doc_no text,
+  doc_date date NOT NULL DEFAULT CURRENT_DATE,
+  amount numeric(14, 2) NOT NULL DEFAULT 0,
+  tax numeric(14, 2) NOT NULL DEFAULT 0,
+  charges numeric(14, 2) NOT NULL DEFAULT 0,
+  net numeric(14, 2) NOT NULL DEFAULT 0,
+  mode pay_mode,
+  category text,
+  reference text,
+  note text,
+  created_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (kind IN ('deposit', 'transfer', 'settlement')),
+  CHECK (
+    status IN (
+      'draft', 'open', 'partial', 'approved', 'rejected', 'paid', 'pending',
+      'settled', 'difference', 'failed', 'reversed', 'cancelled', 'locked',
+      'sent', 'received', 'completed'
+    )
+  )
+);
+
+CREATE TABLE IF NOT EXISTS expenses (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  user_id uuid REFERENCES users (id),
+  shift_id uuid REFERENCES shifts (id),
+  kind text NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  doc_no text,
+  doc_date date NOT NULL DEFAULT CURRENT_DATE,
+  due_date date,
+  amount numeric(14, 2) NOT NULL DEFAULT 0,
+  tax numeric(14, 2) NOT NULL DEFAULT 0,
+  charges numeric(14, 2) NOT NULL DEFAULT 0,
+  net numeric(14, 2) NOT NULL DEFAULT 0,
+  mode pay_mode,
+  category text,
+  note text,
+  frequency text,
+  next_due date,
+  reimbursable boolean NOT NULL DEFAULT false,
+  deduct_from_shift_cash boolean NOT NULL DEFAULT false,
+  attachment text,
+  created_by uuid REFERENCES users (id),
+  decided_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (kind IN ('expense', 'expense_schedule')),
+  CHECK (
+    status IN (
+      'draft', 'open', 'partial', 'approved', 'rejected', 'paid', 'pending',
+      'settled', 'difference', 'failed', 'reversed', 'cancelled', 'locked',
+      'sent', 'received', 'completed'
+    )
+  )
 );
 
 CREATE TABLE IF NOT EXISTS documents (
@@ -325,7 +431,7 @@ CREATE TABLE IF NOT EXISTS documents (
   )
 );
 
-CREATE TABLE IF NOT EXISTS document_lines (
+CREATE TABLE IF NOT EXISTS document_items (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   document_id uuid NOT NULL REFERENCES documents (id),
   product_id uuid REFERENCES products (id),
@@ -377,11 +483,16 @@ CREATE INDEX IF NOT EXISTS dip_readings_equipment_idx ON dip_readings (equipment
 CREATE INDEX IF NOT EXISTS sales_outlet_idx ON sales (outlet_id, doc_date);
 CREATE INDEX IF NOT EXISTS sales_user_idx ON sales (user_id);
 CREATE INDEX IF NOT EXISTS sales_shift_idx ON sales (shift_id);
-CREATE INDEX IF NOT EXISTS sale_lines_sale_idx ON sale_lines (sale_id);
+CREATE INDEX IF NOT EXISTS sale_items_sale_idx ON sale_items (sale_id);
+CREATE INDEX IF NOT EXISTS purchases_outlet_idx ON purchases (outlet_id, doc_date);
+CREATE INDEX IF NOT EXISTS purchases_user_idx ON purchases (user_id);
+CREATE INDEX IF NOT EXISTS purchase_items_purchase_idx ON purchase_items (purchase_id);
+CREATE INDEX IF NOT EXISTS banking_outlet_idx ON banking (outlet_id, kind, doc_date);
+CREATE INDEX IF NOT EXISTS expenses_outlet_idx ON expenses (outlet_id, kind, doc_date);
 CREATE INDEX IF NOT EXISTS documents_outlet_idx ON documents (outlet_id, kind, doc_date);
 CREATE INDEX IF NOT EXISTS documents_user_idx ON documents (user_id);
 CREATE INDEX IF NOT EXISTS documents_parent_idx ON documents (parent_id);
 CREATE INDEX IF NOT EXISTS documents_shift_idx ON documents (shift_id);
-CREATE INDEX IF NOT EXISTS document_lines_document_idx ON document_lines (document_id);
+CREATE INDEX IF NOT EXISTS document_items_document_idx ON document_items (document_id);
 CREATE INDEX IF NOT EXISTS attendance_user_idx ON attendance (user_id, check_in);
 CREATE INDEX IF NOT EXISTS activity_outlet_idx ON activity (outlet_id, at);

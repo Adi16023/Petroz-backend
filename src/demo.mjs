@@ -254,11 +254,75 @@ export async function ensureDemo(pool) {
         );
         for (const line of lines) {
           await client.query(
-            `INSERT INTO sale_lines (sale_id, product_id, equipment_id, description, qty, rate, amount)
+            `INSERT INTO sale_items (sale_id, product_id, equipment_id, description, qty, rate, amount)
              VALUES ($1,$2,$3,$4,$5,$6,$7)`,
             [row.rows[0].id, line.productId ?? null, line.equipmentId ?? null, line.description ?? null, line.qty ?? 0, line.rate ?? 0, line.amount ?? 0],
           );
         }
+        return row.rows[0].id;
+      }
+      if (fields.kind === "purchase" || fields.kind === "purchase_order") {
+        const row = await client.query(
+          `INSERT INTO purchases (
+             outlet_id, user_id, shift_id, kind, status, doc_no, doc_date, due_date,
+             amount, tax, charges, net, mode, category, reference, note, created_by, created_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7::date,$8::date,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+           ) RETURNING id`,
+          [
+            fields.outletId, fields.partyId ?? null, fields.shiftId ?? null, fields.kind, fields.status ?? "open",
+            fields.docNo ?? null, fields.docDate ?? new Date().toISOString().slice(0, 10), fields.dueDate ?? null,
+            fields.amount ?? 0, fields.tax ?? 0, fields.charges ?? 0, fields.net ?? fields.amount ?? 0,
+            fields.mode ?? null, fields.category ?? null, fields.reference ?? null, fields.note ?? null,
+            fields.createdBy ?? null, fields.at ?? new Date().toISOString(),
+          ],
+        );
+        for (const line of lines) {
+          await client.query(
+            `INSERT INTO purchase_items (purchase_id, product_id, equipment_id, description, qty, rate, amount, qty_received)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+            [row.rows[0].id, line.productId ?? null, line.equipmentId ?? null, line.description ?? null, line.qty ?? 0, line.rate ?? 0, line.amount ?? 0, line.qtyReceived ?? null],
+          );
+        }
+        return row.rows[0].id;
+      }
+      if (fields.kind === "transfer" || fields.kind === "settlement" || (fields.kind === "receipt" && fields.category === "cash_deposit")) {
+        const row = await client.query(
+          `INSERT INTO banking (
+             outlet_id, user_id, counterparty_id, shift_id, kind, status, doc_no, doc_date,
+             amount, tax, charges, net, mode, category, reference, note, created_by, created_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7,$8::date,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18
+           ) RETURNING id`,
+          [
+            fields.outletId, fields.partyId ?? null, fields.counterpartyId ?? null, fields.shiftId ?? null,
+            fields.kind === "receipt" ? "deposit" : fields.kind, fields.status ?? "open", fields.docNo ?? null,
+            fields.docDate ?? new Date().toISOString().slice(0, 10), fields.amount ?? 0, fields.tax ?? 0,
+            fields.charges ?? 0, fields.net ?? fields.amount ?? 0, fields.mode ?? null,
+            fields.kind === "receipt" ? "cash_deposit" : fields.category ?? null, fields.reference ?? null,
+            fields.note ?? null, fields.createdBy ?? null, fields.at ?? new Date().toISOString(),
+          ],
+        );
+        return row.rows[0].id;
+      }
+      if (fields.kind === "expense" || fields.kind === "expense_schedule") {
+        const row = await client.query(
+          `INSERT INTO expenses (
+             outlet_id, user_id, shift_id, kind, status, doc_no, doc_date, due_date,
+             amount, tax, charges, net, mode, category, note, frequency, next_due,
+             reimbursable, created_by, created_at
+           ) VALUES (
+             $1,$2,$3,$4,$5,$6,$7::date,$8::date,$9,$10,$11,$12,$13,$14,$15,$16,$17::date,$18,$19,$20
+           ) RETURNING id`,
+          [
+            fields.outletId, fields.partyId ?? null, fields.shiftId ?? null, fields.kind, fields.status ?? "open",
+            fields.docNo ?? null, fields.docDate ?? new Date().toISOString().slice(0, 10), fields.dueDate ?? null,
+            fields.amount ?? 0, fields.tax ?? 0, fields.charges ?? 0, fields.net ?? fields.amount ?? 0,
+            fields.mode ?? null, fields.category ?? null, fields.note ?? null, fields.frequency ?? null,
+            fields.nextDue ?? null, fields.reimbursable ?? false, fields.createdBy ?? null,
+            fields.at ?? new Date().toISOString(),
+          ],
+        );
         return row.rows[0].id;
       }
       const row = await client.query(
@@ -297,7 +361,7 @@ export async function ensureDemo(pool) {
       );
       for (const line of lines) {
         await client.query(
-          `INSERT INTO document_lines (document_id, product_id, equipment_id, description, qty, rate, amount, qty_received)
+          `INSERT INTO document_items (document_id, product_id, equipment_id, description, qty, rate, amount, qty_received)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
           [row.rows[0].id, line.productId ?? null, line.equipmentId ?? null, line.description ?? null, line.qty ?? 0, line.rate ?? 0, line.amount ?? 0, line.qtyReceived ?? null],
         );
