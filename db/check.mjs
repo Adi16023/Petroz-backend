@@ -5,17 +5,17 @@ const expected = [
   "activity",
   "attendance",
   "balances",
-  "dealers",
+  "dip_readings",
   "document_lines",
   "documents",
   "equipment",
   "outlets",
-  "parties",
-  "party_outlets",
   "products",
-  "readings",
-  "shift_duties",
+  "sale_lines",
+  "sales",
+  "settings",
   "shifts",
+  "users",
 ];
 
 const pool = createPool();

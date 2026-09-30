@@ -5,6 +5,7 @@ import pg from "pg";
 import "dotenv/config";
 
 const dir = path.dirname(fileURLToPath(import.meta.url));
+const reshape = fs.readFileSync(path.join(dir, "reshape.sql"), "utf8");
 const sql = fs.readFileSync(path.join(dir, "schema.sql"), "utf8");
 
 function directUrl(url) {
@@ -21,6 +22,7 @@ export async function migrate() {
   const client = await pool.connect();
   try {
     await client.query("BEGIN");
+    await client.query(reshape);
     await client.query(sql);
     await client.query("COMMIT");
   } catch (error) {

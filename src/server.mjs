@@ -4,6 +4,7 @@ import cors from "cors";
 import { migrate } from "../db/migrate.mjs";
 import { createPool } from "../db/pool.mjs";
 import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./auth.mjs";
+import { ensureDemo } from "./demo.mjs";
 import { ensureSeed } from "./seed.mjs";
 
 const DOCUMENT_KINDS = [
@@ -51,7 +52,7 @@ function inr(value) {
 function partyDto(row, extra = {}) {
   return {
     id: row.id,
-    dealerId: row.dealer_id,
+    dealerId: row.settings_id,
     role: row.role,
     staffType: row.staff_type,
     name: row.name,
@@ -103,7 +104,7 @@ function documentDto(row) {
   return {
     id: row.id,
     outletId: row.outlet_id,
-    partyId: row.party_id,
+    partyId: row.user_id ?? row.party_id,
     partyName: row.party_name ?? null,
     counterpartyId: row.counterparty_id,
     shiftId: row.shift_id,
@@ -174,11 +175,11 @@ const pool = createPool();
 const auth = requireAuth(pool);
 
 app.post("/api/login", wrap(async (req, res) => {
-  const party = await login(pool, req.body?.phone, req.body?.password);
-  const outletIds = await outletIdsFor(pool, party);
+  const user = await login(pool, req.body?.phone, req.body?.password);
+  const outletIds = await outletIdsFor(pool, user);
   res.json({
-    token: signToken(party),
-    user: partyDto({ ...party, outlet_ids: outletIds }),
+    token: signToken(user),
+    user: partyDto({ ...user, outlet_ids: outletIds }),
   });
 }));
 
@@ -190,7 +191,7 @@ app.get("/api/me", wrap(async (req, res) => {
 }));
 
 app.get("/api/dealer", wrap(async (req, res) => {
-  const { rows } = await pool.query(`SELECT * FROM dealers WHERE id = $1`, [req.user.dealer_id]);
+  const { rows } = await pool.query(`SELECT * FROM settings WHERE id = $1`, [req.user.settings_id]);
   const dealer = rows[0];
   if (!dealer) throw bad("Dealer not found.", 404);
   res.json({
@@ -213,12 +214,12 @@ app.get("/api/outlets", wrap(async (req, res) => {
 
 app.get("/api/notifications", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
-  const dealer = await pool.query(`SELECT variance_alert FROM dealers WHERE id = $1`, [req.user.dealer_id]);
+  const dealer = await pool.query(`SELECT variance_alert FROM settings WHERE id = $1`, [req.user.settings_id]);
   const alertAt = num(dealer.rows[0]?.variance_alert) ?? 200;
   const [shifts, attendance, expenses, tanks, credit, deposits, settlements, stock, dips] = await Promise.all([
     pool.query(`SELECT * FROM shifts WHERE outlet_id = $1`, [outlet.id]),
     pool.query(
-      `SELECT a.*, p.name FROM attendance a JOIN parties p ON p.id = a.party_id WHERE a.outlet_id = $1`,
+      `SELECT a.*, u.name FROM attendance a JOIN users u ON u.id = a.user_id WHERE a.outlet_id = $1`,
       [outlet.id],
     ),
     pool.query(
@@ -231,8 +232,8 @@ app.get("/api/notifications", wrap(async (req, res) => {
     ),
     pool.query(
       `SELECT COALESCE(SUM(net), 0) AS outstanding
-       FROM documents
-       WHERE outlet_id = $1 AND kind = 'sale' AND mode = 'credit' AND status <> 'cancelled'`,
+       FROM sales
+       WHERE outlet_id = $1 AND mode = 'credit' AND status <> 'cancelled'`,
       [outlet.id],
     ),
     pool.query(
@@ -256,7 +257,7 @@ app.get("/api/notifications", wrap(async (req, res) => {
     ),
     pool.query(
       `SELECT r.*, e.label
-       FROM readings r JOIN equipment e ON e.id = r.equipment_id
+       FROM dip_readings r JOIN equipment e ON e.id = r.equipment_id
        WHERE e.outlet_id = $1 AND r.kind = 'dip'`,
       [outlet.id],
     ),
@@ -266,17 +267,16 @@ app.get("/api/notifications", wrap(async (req, res) => {
   const open = shifts.rows.find((row) => row.status === "open");
   const onDuty = new Set();
   if (open) {
-    const duties = await pool.query(
-      `SELECT party_id FROM shift_duties WHERE shift_id = $1 AND checked_out_at IS NULL`,
-      [open.id],
-    );
-    for (const duty of duties.rows) onDuty.add(duty.party_id);
+    const duties = Array.isArray(open.duties) ? open.duties : [];
+    for (const duty of duties) {
+      if (!duty.checkedOutAt) onDuty.add(duty.userId);
+    }
   }
 
   for (const row of attendance.rows.filter((row) => row.spoof)) {
     notes.push({ id: `spoof-${row.id}`, tone: "bad", text: `${row.name} GPS spoof.`, href: "/attendance" });
   }
-  for (const row of attendance.rows.filter((row) => !row.check_out && !onDuty.has(row.party_id))) {
+  for (const row of attendance.rows.filter((row) => !row.check_out && !onDuty.has(row.user_id))) {
     notes.push({ id: `out-${row.id}`, tone: "warn", text: `${row.name} never checked out.`, href: "/attendance" });
   }
   for (const row of expenses.rows) {
@@ -309,8 +309,8 @@ app.get("/api/notifications", wrap(async (req, res) => {
   }
   const cashSales = await pool.query(
     `SELECT COALESCE(SUM(net), 0) AS cash
-     FROM documents
-     WHERE outlet_id = $1 AND kind = 'sale' AND mode = 'cash' AND doc_date = CURRENT_DATE AND status <> 'cancelled'`,
+     FROM sales
+     WHERE outlet_id = $1 AND mode = 'cash' AND doc_date = CURRENT_DATE AND status <> 'cancelled'`,
     [outlet.id],
   );
   const deposited = num(deposits.rows[0]?.deposited);
@@ -362,25 +362,25 @@ app.get("/api/dashboard", wrap(async (req, res) => {
   );
   const open = openResult.rows[0] ?? null;
   const sales = await pool.query(
-    `SELECT d.net, d.mode, d.created_at, pr.kind AS product_kind, pr.name AS product_name
-     FROM documents d
-     LEFT JOIN document_lines l ON l.document_id = d.id
+    `SELECT s.net, s.mode, s.created_at, pr.kind AS product_kind, pr.name AS product_name
+     FROM sales s
+     LEFT JOIN sale_lines l ON l.sale_id = s.id
      LEFT JOIN products pr ON pr.id = l.product_id
-     WHERE d.outlet_id = $1 AND d.kind = 'sale' AND d.status <> 'cancelled'
-       AND d.shift_id IS NOT DISTINCT FROM $2::uuid`,
+     WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
+       AND s.shift_id IS NOT DISTINCT FROM $2::uuid`,
     [outlet.id, open?.id ?? null],
   );
   const yesterday = await pool.query(
-    `SELECT COALESCE(SUM(d.net), 0) AS total,
-            COALESCE(SUM(d.net) FILTER (WHERE pr.kind = 'fuel'), 0) AS fuel,
-            COALESCE(SUM(d.net) FILTER (WHERE pr.kind IN ('lube', 'fmcg')), 0) AS shop,
-            COALESCE(SUM(d.net) FILTER (WHERE d.mode = 'cash'), 0) AS cash,
-            COALESCE(SUM(d.net) FILTER (WHERE d.mode = 'credit'), 0) AS credit
-     FROM documents d
-     LEFT JOIN document_lines l ON l.document_id = d.id
+    `SELECT COALESCE(SUM(s.net), 0) AS total,
+            COALESCE(SUM(s.net) FILTER (WHERE pr.kind = 'fuel'), 0) AS fuel,
+            COALESCE(SUM(s.net) FILTER (WHERE pr.kind IN ('lube', 'fmcg')), 0) AS shop,
+            COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'cash'), 0) AS cash,
+            COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'credit'), 0) AS credit
+     FROM sales s
+     LEFT JOIN sale_lines l ON l.sale_id = s.id
      LEFT JOIN products pr ON pr.id = l.product_id
-     WHERE d.outlet_id = $1 AND d.kind = 'sale' AND d.status <> 'cancelled'
-       AND d.doc_date = CURRENT_DATE - 1`,
+     WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
+       AND s.doc_date = CURRENT_DATE - 1`,
     [outlet.id],
   );
   const tanks = await pool.query(
@@ -440,11 +440,17 @@ app.get("/api/dsr", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const docs = await pool.query(
-    `SELECT d.*, pr.kind AS product_kind
+    `SELECT d.kind::text AS kind, d.net, d.mode::text AS mode, d.category, d.status, pr.kind AS product_kind
      FROM documents d
      LEFT JOIN document_lines l ON l.document_id = d.id
      LEFT JOIN products pr ON pr.id = l.product_id
-     WHERE d.outlet_id = $1 AND d.doc_date = $2 AND d.status <> 'cancelled'`,
+     WHERE d.outlet_id = $1 AND d.doc_date = $2 AND d.status <> 'cancelled'
+     UNION ALL
+     SELECT 'sale', s.net, s.mode::text, s.category, s.status, pr.kind
+     FROM sales s
+     LEFT JOIN sale_lines l ON l.sale_id = s.id
+     LEFT JOIN products pr ON pr.id = l.product_id
+     WHERE s.outlet_id = $1 AND s.doc_date = $2 AND s.status <> 'cancelled'`,
     [outlet.id, date],
   );
   const shifts = await pool.query(
@@ -501,41 +507,45 @@ app.get("/api/shifts/:id", wrap(async (req, res) => {
   const shift = rows[0];
   if (!shift) throw bad("Shift not found.", 404);
   await assertOutlet(pool, req.user, shift.outlet_id);
-  const duties = await pool.query(
-    `SELECT sd.*, p.name AS party_name, e.label AS nozzle_label
-     FROM shift_duties sd
-     JOIN parties p ON p.id = sd.party_id
-     JOIN equipment e ON e.id = sd.nozzle_id
-     WHERE sd.shift_id = $1
-     ORDER BY sd.window_start`,
-    [shift.id],
-  );
-  const readings = await pool.query(
-    `SELECT r.*, e.label AS equipment_label, p.name AS party_name
-     FROM readings r
-     JOIN equipment e ON e.id = r.equipment_id
-     LEFT JOIN parties p ON p.id = r.party_id
-     WHERE r.shift_id = $1
-     ORDER BY r.at`,
-    [shift.id],
-  );
+  const dutyRows = Array.isArray(shift.duties) ? shift.duties : [];
+  const dutyUserIds = [...new Set(dutyRows.map((duty) => duty.userId).filter(Boolean))];
+  const dutyNozzleIds = [...new Set(dutyRows.map((duty) => duty.nozzleId).filter(Boolean))];
+  const [dutyUsers, dutyNozzles, readings] = await Promise.all([
+    dutyUserIds.length
+      ? pool.query(`SELECT id, name FROM users WHERE id = ANY($1::uuid[])`, [dutyUserIds])
+      : Promise.resolve({ rows: [] }),
+    dutyNozzleIds.length
+      ? pool.query(`SELECT id, label FROM equipment WHERE id = ANY($1::uuid[])`, [dutyNozzleIds])
+      : Promise.resolve({ rows: [] }),
+    pool.query(
+      `SELECT r.*, e.label AS equipment_label, u.name AS party_name
+       FROM dip_readings r
+       JOIN equipment e ON e.id = r.equipment_id
+       LEFT JOIN users u ON u.id = r.user_id
+       WHERE r.shift_id = $1
+       ORDER BY r.at`,
+      [shift.id],
+    ),
+  ]);
+  const dutyNames = new Map(dutyUsers.rows.map((row) => [row.id, row.name]));
+  const nozzleLabels = new Map(dutyNozzles.rows.map((row) => [row.id, row.label]));
   res.json({
     ...shiftDto(shift),
-    duties: duties.rows.map((row) => ({
-      id: row.id,
-      partyId: row.party_id,
-      partyName: row.party_name,
-      nozzleId: row.nozzle_id,
-      nozzleLabel: row.nozzle_label,
-      windowStart: row.window_start,
-      windowEnd: row.window_end,
-      checkedOutAt: row.checked_out_at,
+    duties: dutyRows.map((duty) => ({
+      id: duty.id,
+      partyId: duty.userId,
+      partyName: dutyNames.get(duty.userId) ?? null,
+      nozzleId: duty.nozzleId ?? null,
+      nozzleLabel: duty.nozzleId ? nozzleLabels.get(duty.nozzleId) ?? null : null,
+      windowStart: duty.windowStart,
+      windowEnd: duty.windowEnd,
+      checkedOutAt: duty.checkedOutAt ?? null,
     })),
     readings: readings.rows.map((row) => ({
       id: row.id,
       equipmentId: row.equipment_id,
       equipmentLabel: row.equipment_label,
-      partyId: row.party_id,
+      partyId: row.user_id,
       partyName: row.party_name,
       kind: row.kind,
       at: row.at,
@@ -553,10 +563,10 @@ app.get("/api/readings", wrap(async (req, res) => {
   const kind = req.query.kind || null;
   if (kind && !["opening", "closing", "dip"].includes(kind)) throw bad("Unknown reading kind.");
   const { rows } = await pool.query(
-    `SELECT r.*, e.label AS equipment_label, e.kind AS equipment_kind, p.name AS party_name, s.label AS shift_label
-     FROM readings r
+    `SELECT r.*, e.label AS equipment_label, e.kind AS equipment_kind, u.name AS party_name, s.label AS shift_label
+     FROM dip_readings r
      JOIN equipment e ON e.id = r.equipment_id
-     LEFT JOIN parties p ON p.id = r.party_id
+     LEFT JOIN users u ON u.id = r.user_id
      LEFT JOIN shifts s ON s.id = r.shift_id
      WHERE e.outlet_id = $1
        AND ($2::reading_kind IS NULL OR r.kind = $2::reading_kind)
@@ -571,7 +581,7 @@ app.get("/api/readings", wrap(async (req, res) => {
     equipmentId: row.equipment_id,
     equipmentLabel: row.equipment_label,
     equipmentKind: row.equipment_kind,
-    partyId: row.party_id,
+    partyId: row.user_id,
     partyName: row.party_name,
     kind: row.kind,
     at: row.at,
@@ -626,9 +636,9 @@ app.get("/api/products", wrap(async (req, res) => {
     `SELECT pr.*, b.on_hand, b.min_qty
      FROM products pr
      LEFT JOIN balances b ON b.product_id = pr.id AND b.outlet_id = $1
-     WHERE pr.dealer_id = $2
+     WHERE pr.settings_id = $2
      ORDER BY pr.kind, pr.name`,
-    [outlet.id, req.user.dealer_id],
+    [outlet.id, req.user.settings_id],
   );
   res.json(rows.map((row) => ({
     id: row.id,
@@ -652,17 +662,25 @@ app.get("/api/products/:id", wrap(async (req, res) => {
     `SELECT pr.*, b.on_hand, b.min_qty
      FROM products pr
      LEFT JOIN balances b ON b.product_id = pr.id AND b.outlet_id = $2
-     WHERE pr.id = $1 AND pr.dealer_id = $3`,
-    [req.params.id, outlet.id, req.user.dealer_id],
+     WHERE pr.id = $1 AND pr.settings_id = $3`,
+    [req.params.id, outlet.id, req.user.settings_id],
   );
   const row = product.rows[0];
   if (!row) throw bad("Product not found.", 404);
   const movement = await pool.query(
-    `SELECT d.id, d.kind, d.doc_no, d.doc_date, d.status, l.qty, l.amount, l.qty_received
-     FROM document_lines l
-     JOIN documents d ON d.id = l.document_id
-     WHERE l.product_id = $1 AND d.outlet_id = $2
-     ORDER BY d.doc_date DESC, d.created_at DESC`,
+    `SELECT id, kind, doc_no, doc_date, status, qty, amount, qty_received, created_at
+     FROM (
+       SELECT d.id, d.kind::text AS kind, d.doc_no, d.doc_date, d.status, l.qty, l.amount, l.qty_received, d.created_at
+       FROM document_lines l
+       JOIN documents d ON d.id = l.document_id
+       WHERE l.product_id = $1 AND d.outlet_id = $2
+       UNION ALL
+       SELECT s.id, 'sale', s.doc_no, s.doc_date, s.status, l.qty, l.amount, NULL, s.created_at
+       FROM sale_lines l
+       JOIN sales s ON s.id = l.sale_id
+       WHERE l.product_id = $1 AND s.outlet_id = $2
+     ) movement
+     ORDER BY doc_date DESC, created_at DESC`,
     [row.id, outlet.id],
   );
   res.json({
@@ -693,7 +711,7 @@ app.get("/api/products/:id", wrap(async (req, res) => {
 
 async function creditExtras(outletId) {
   const { rows } = await pool.query(
-    `SELECT party_id,
+    `SELECT user_id,
             COALESCE(SUM(CASE
               WHEN kind = 'sale' AND mode = 'credit' AND status <> 'cancelled' THEN net
               WHEN kind = 'adjustment' AND category = 'debit_note' THEN net
@@ -707,12 +725,19 @@ async function creditExtras(outletId) {
             MAX(CASE
               WHEN kind = 'sale' AND mode = 'credit' AND due_date < CURRENT_DATE THEN CURRENT_DATE - due_date
               ELSE 0 END) AS overdue_days
-     FROM documents
-     WHERE outlet_id = $1
-     GROUP BY party_id`,
+     FROM (
+       SELECT user_id, 'sale'::text AS kind, mode::text AS mode, status, net, due_date, category
+       FROM sales
+       WHERE outlet_id = $1
+       UNION ALL
+       SELECT user_id, kind::text, mode::text, status, net, due_date, category
+       FROM documents
+       WHERE outlet_id = $1
+     ) books
+     GROUP BY user_id`,
     [outletId],
   );
-  return new Map(rows.map((row) => [row.party_id, row]));
+  return new Map(rows.map((row) => [row.user_id, row]));
 }
 
 function withCredit(row, extras) {
@@ -733,13 +758,19 @@ app.get("/api/parties", wrap(async (req, res) => {
   const role = req.query.role || null;
   if (role && !PARTY_ROLES.includes(role)) throw bad("Unknown role.");
   const { rows } = await pool.query(
-    `SELECT p.*, ARRAY[po.outlet_id] AS outlet_ids
-     FROM parties p
-     JOIN party_outlets po ON po.party_id = p.id
-     WHERE po.outlet_id = $1 AND p.dealer_id = $2
-       AND ($3::party_role IS NULL OR p.role = $3::party_role)
-     ORDER BY p.name`,
-    [outlet.id, req.user.dealer_id, role],
+    `SELECT u.*,
+            CASE
+              WHEN u.outlet_id IS NULL THEN (
+                SELECT COALESCE(array_agg(id ORDER BY name), '{}') FROM outlets WHERE settings_id = u.settings_id
+              )
+              ELSE ARRAY[u.outlet_id]
+            END AS outlet_ids
+     FROM users u
+     WHERE u.settings_id = $2
+       AND (u.outlet_id IS NULL OR u.outlet_id = $1)
+       AND ($3::user_role IS NULL OR u.role = $3::user_role)
+     ORDER BY u.name`,
+    [outlet.id, req.user.settings_id, role],
   );
   const extras = await creditExtras(outlet.id);
   res.json(rows.map((row) => withCredit(row, extras)));
@@ -747,12 +778,16 @@ app.get("/api/parties", wrap(async (req, res) => {
 
 app.get("/api/parties/:id", wrap(async (req, res) => {
   const { rows } = await pool.query(
-    `SELECT p.*, COALESCE(array_agg(po.outlet_id) FILTER (WHERE po.outlet_id IS NOT NULL), '{}') AS outlet_ids
-     FROM parties p
-     LEFT JOIN party_outlets po ON po.party_id = p.id
-     WHERE p.id = $1 AND p.dealer_id = $2
-     GROUP BY p.id`,
-    [req.params.id, req.user.dealer_id],
+    `SELECT u.*,
+            CASE
+              WHEN u.outlet_id IS NULL THEN (
+                SELECT COALESCE(array_agg(id ORDER BY name), '{}') FROM outlets WHERE settings_id = u.settings_id
+              )
+              ELSE ARRAY[u.outlet_id]
+            END AS outlet_ids
+     FROM users u
+     WHERE u.id = $1 AND u.settings_id = $2`,
+    [req.params.id, req.user.settings_id],
   );
   const row = rows[0];
   if (!row) throw bad("Party not found.", 404);
@@ -766,7 +801,7 @@ app.get("/api/parties/:id", wrap(async (req, res) => {
 }));
 
 const documentSelect = `
-  SELECT d.*, p.name AS party_name,
+  SELECT d.*, d.user_id AS party_id, u.name AS party_name,
          COALESCE(json_agg(json_build_object(
            'id', l.id,
            'product_id', l.product_id,
@@ -779,8 +814,27 @@ const documentSelect = `
            'qty_received', l.qty_received
          )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
   FROM documents d
-  LEFT JOIN parties p ON p.id = d.party_id
+  LEFT JOIN users u ON u.id = d.user_id
   LEFT JOIN document_lines l ON l.document_id = d.id
+  LEFT JOIN products pr ON pr.id = l.product_id
+`;
+
+const saleSelect = `
+  SELECT s.*, s.user_id AS party_id, u.name AS party_name,
+         COALESCE(json_agg(json_build_object(
+           'id', l.id,
+           'product_id', l.product_id,
+           'product_name', pr.name,
+           'equipment_id', l.equipment_id,
+           'description', l.description,
+           'qty', l.qty,
+           'rate', l.rate,
+           'amount', l.amount,
+           'qty_received', NULL
+         )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
+  FROM sales s
+  LEFT JOIN users u ON u.id = s.user_id
+  LEFT JOIN sale_lines l ON l.sale_id = s.id
   LEFT JOIN products pr ON pr.id = l.product_id
 `;
 
@@ -790,38 +844,67 @@ app.get("/api/documents", wrap(async (req, res) => {
   if (kinds?.some((kind) => !DOCUMENT_KINDS.includes(kind))) throw bad("Unknown document kind.");
   const modes = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
   if (req.query.mode && !modes.includes(req.query.mode)) throw bad("Unknown payment mode.");
-  const { rows } = await pool.query(
-    `${documentSelect}
-     WHERE d.outlet_id = $1
-       AND ($2::document_kind[] IS NULL OR d.kind = ANY($2::document_kind[]))
-       AND ($3::uuid IS NULL OR d.party_id = $3::uuid)
-       AND ($4::uuid IS NULL OR d.shift_id = $4::uuid)
-       AND ($5::date IS NULL OR d.doc_date >= $5::date)
-       AND ($6::date IS NULL OR d.doc_date <= $6::date)
-       AND ($7::text IS NULL OR d.category = $7)
-       AND ($8::pay_mode IS NULL OR d.mode = $8::pay_mode)
-     GROUP BY d.id, p.name
-     ORDER BY d.doc_date DESC, d.created_at DESC`,
-    [
-      outlet.id,
-      kinds,
-      req.query.partyId || null,
-      req.query.shiftId || null,
-      req.query.from || null,
-      req.query.to || null,
-      req.query.category || null,
-      req.query.mode || null,
-    ],
-  );
-  res.json(rows.map(documentDto));
+  const documentKinds = kinds?.filter((kind) => kind !== "sale") ?? null;
+  const wantSales = !kinds || kinds.includes("sale");
+  const filters = [
+    outlet.id,
+    req.query.partyId || null,
+    req.query.shiftId || null,
+    req.query.from || null,
+    req.query.to || null,
+    req.query.category || null,
+    req.query.mode || null,
+  ];
+  const [docs, sales] = await Promise.all([
+    !kinds || documentKinds?.length
+      ? pool.query(
+          `${documentSelect}
+           WHERE d.outlet_id = $1
+             AND ($2::document_kind[] IS NULL OR d.kind = ANY($2::document_kind[]))
+             AND ($3::uuid IS NULL OR d.user_id = $3::uuid)
+             AND ($4::uuid IS NULL OR d.shift_id = $4::uuid)
+             AND ($5::date IS NULL OR d.doc_date >= $5::date)
+             AND ($6::date IS NULL OR d.doc_date <= $6::date)
+             AND ($7::text IS NULL OR d.category = $7)
+             AND ($8::pay_mode IS NULL OR d.mode = $8::pay_mode)
+           GROUP BY d.id, u.name
+           ORDER BY d.doc_date DESC, d.created_at DESC`,
+          [outlet.id, documentKinds, ...filters.slice(1)],
+        )
+      : Promise.resolve({ rows: [] }),
+    wantSales
+      ? pool.query(
+          `${saleSelect}
+           WHERE s.outlet_id = $1
+             AND ($2::uuid IS NULL OR s.user_id = $2::uuid)
+             AND ($3::uuid IS NULL OR s.shift_id = $3::uuid)
+             AND ($4::date IS NULL OR s.doc_date >= $4::date)
+             AND ($5::date IS NULL OR s.doc_date <= $5::date)
+             AND ($6::text IS NULL OR s.category = $6)
+             AND ($7::pay_mode IS NULL OR s.mode = $7::pay_mode)
+           GROUP BY s.id, u.name`,
+          filters,
+        )
+      : Promise.resolve({ rows: [] }),
+  ]);
+  const rows = [...docs.rows.map(documentDto), ...sales.rows.map((row) => documentDto({ ...row, kind: "sale" }))];
+  rows.sort((a, b) => String(b.docDate).localeCompare(String(a.docDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
+  res.json(rows);
 }));
 
 app.get("/api/documents/:id", wrap(async (req, res) => {
-  const { rows } = await pool.query(
-    `${documentSelect} WHERE d.id = $1 GROUP BY d.id, p.name`,
+  const docs = await pool.query(
+    `${documentSelect} WHERE d.id = $1 GROUP BY d.id, u.name`,
     [req.params.id],
   );
-  const row = rows[0];
+  let row = docs.rows[0];
+  if (!row) {
+    const sales = await pool.query(
+      `${saleSelect} WHERE s.id = $1 GROUP BY s.id, u.name`,
+      [req.params.id],
+    );
+    row = sales.rows[0] ? { ...sales.rows[0], kind: "sale" } : null;
+  }
   if (!row) throw bad("Document not found.", 404);
   await assertOutlet(pool, req.user, row.outlet_id);
   res.json(documentDto(row));
@@ -830,16 +913,16 @@ app.get("/api/documents/:id", wrap(async (req, res) => {
 app.get("/api/attendance", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const { rows } = await pool.query(
-    `SELECT a.*, p.name AS party_name
+    `SELECT a.*, u.name AS party_name
      FROM attendance a
-     JOIN parties p ON p.id = a.party_id
-     WHERE a.outlet_id = $1 AND ($2::uuid IS NULL OR a.party_id = $2::uuid)
+     JOIN users u ON u.id = a.user_id
+     WHERE a.outlet_id = $1 AND ($2::uuid IS NULL OR a.user_id = $2::uuid)
      ORDER BY a.check_in DESC`,
     [outlet.id, req.query.partyId || null],
   );
   res.json(rows.map((row) => ({
     id: row.id,
-    partyId: row.party_id,
+    partyId: row.user_id,
     partyName: row.party_name,
     outletId: row.outlet_id,
     checkIn: row.check_in,
@@ -858,9 +941,9 @@ app.get("/api/activity", wrap(async (req, res) => {
   if (outletId) await assertOutlet(pool, req.user, outletId);
   const allowed = await outletIdsFor(pool, req.user);
   const { rows } = await pool.query(
-    `SELECT a.*, p.name AS actor_name
+    `SELECT a.*, u.name AS actor_name
      FROM activity a
-     LEFT JOIN parties p ON p.id = a.actor_id
+     LEFT JOIN users u ON u.id = a.actor_id
      WHERE (a.outlet_id = ANY($1::uuid[]) OR a.outlet_id IS NULL)
        AND ($2::uuid IS NULL OR a.outlet_id = $2::uuid)
        AND ($3::text IS NULL OR a.action = $3)
@@ -897,6 +980,8 @@ if (!process.env.JWT_SECRET) {
 await migrate();
 const seed = await ensureSeed(pool);
 if (seed.seeded) console.log("Seeded one dealer and two outlets.");
+const demo = await ensureDemo(pool);
+if (demo.seeded) console.log("Loaded desk data for both outlets.");
 
 const port = Number(process.env.PORT) || 3001;
 app.listen(port, () => {

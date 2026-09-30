@@ -10,9 +10,9 @@ const LOGIN_ROLES = [
   "accounts_auditor",
 ];
 
-export function signToken(party) {
+export function signToken(user) {
   return jwt.sign(
-    { sub: party.id, dealerId: party.dealer_id, role: party.role },
+    { sub: user.id, dealerId: user.settings_id, role: user.role },
     process.env.JWT_SECRET,
     { expiresIn: "7d" },
   );
@@ -26,14 +26,14 @@ export function requireAuth(pool) {
     try {
       const payload = jwt.verify(token, process.env.JWT_SECRET);
       const { rows } = await pool.query(
-        `SELECT * FROM parties WHERE id = $1 AND active = true`,
+        `SELECT * FROM users WHERE id = $1 AND active = true`,
         [payload.sub],
       );
-      const party = rows[0];
-      if (!party || !LOGIN_ROLES.includes(party.role)) {
+      const user = rows[0];
+      if (!user || !LOGIN_ROLES.includes(user.role)) {
         return res.status(401).json({ error: "Sign in required." });
       }
-      req.user = party;
+      req.user = user;
       next();
     } catch {
       return res.status(401).json({ error: "Sign in required." });
@@ -49,59 +49,55 @@ export async function login(pool, phone, password) {
     throw error;
   }
   const { rows } = await pool.query(
-    `SELECT * FROM parties
+    `SELECT * FROM users
      WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
-       AND role = ANY($2::party_role[])
+       AND role = ANY($2::user_role[])
        AND active = true`,
     [digits, LOGIN_ROLES],
   );
-  const party = rows[0];
-  if (!party?.password_hash) {
+  const user = rows[0];
+  if (!user?.password_hash) {
     const error = new Error("Phone or password is wrong.");
     error.status = 401;
     throw error;
   }
-  const ok = await bcrypt.compare(String(password), party.password_hash);
+  const ok = await bcrypt.compare(String(password), user.password_hash);
   if (!ok) {
     const error = new Error("Phone or password is wrong.");
     error.status = 401;
     throw error;
   }
-  return party;
+  return user;
 }
 
-export async function outletIdsFor(pool, party) {
-  if (party.role === "owner" || party.role === "auditor" || party.role === "accounts_auditor") {
+export async function outletIdsFor(pool, user) {
+  if (!user.outlet_id || user.role === "owner" || user.role === "auditor" || user.role === "accounts_auditor") {
     const { rows } = await pool.query(
-      `SELECT id FROM outlets WHERE dealer_id = $1 ORDER BY name`,
-      [party.dealer_id],
+      `SELECT id FROM outlets WHERE settings_id = $1 ORDER BY name`,
+      [user.settings_id],
     );
     return rows.map((row) => row.id);
   }
-  const { rows } = await pool.query(
-    `SELECT outlet_id FROM party_outlets WHERE party_id = $1`,
-    [party.id],
-  );
-  return rows.map((row) => row.outlet_id);
+  return [user.outlet_id];
 }
 
-export async function assertOutlet(pool, party, outletId) {
+export async function assertOutlet(pool, user, outletId) {
   if (!outletId) {
     const error = new Error("outletId is required.");
     error.status = 400;
     throw error;
   }
   const { rows } = await pool.query(
-    `SELECT id, dealer_id, name, code FROM outlets WHERE id = $1`,
+    `SELECT id, settings_id, name, code FROM outlets WHERE id = $1`,
     [outletId],
   );
   const outlet = rows[0];
-  if (!outlet || outlet.dealer_id !== party.dealer_id) {
+  if (!outlet || outlet.settings_id !== user.settings_id) {
     const error = new Error("Outlet not found.");
     error.status = 404;
     throw error;
   }
-  const allowed = await outletIdsFor(pool, party);
+  const allowed = await outletIdsFor(pool, user);
   if (!allowed.includes(outlet.id)) {
     const error = new Error("This pump is not on your desk.");
     error.status = 403;
