@@ -65,9 +65,7 @@ DO $$ BEGIN
   CREATE TYPE shift_status AS ENUM (
     'upcoming',
     'open',
-    'closed',
-    'approved',
-    'rejected'
+    'closed'
   );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;

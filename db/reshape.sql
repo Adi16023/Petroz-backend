@@ -400,3 +400,11 @@ BEGIN
     ALTER TABLE document_lines RENAME TO document_items;
   END IF;
 END $$;
+
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_tables WHERE schemaname = 'public' AND tablename = 'shifts') THEN
+    EXECUTE 'UPDATE shifts SET status = ''closed'' WHERE status = ''approved''';
+    EXECUTE 'UPDATE shifts SET status = ''open'' WHERE status = ''rejected''';
+  END IF;
+END $$;

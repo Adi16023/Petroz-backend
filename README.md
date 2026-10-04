@@ -1,6 +1,6 @@
 # Petroz backend
 
-Dealer desk API. One dealer, two outlets. Phone and password login returns a JWT. The other routes are GET and require `Authorization: Bearer <token>`.
+Dealer desk API. One dealer, two outlets. Phone and password login returns a JWT. Reads are GET. Creates are POST, changes are PATCH, and removals are DELETE. Every route except login and `/health` requires `Authorization: Bearer <token>`.
 
 On an empty database the server creates the tables, then one dealer (Whitefield and T. Nagar) and the owner login.
 

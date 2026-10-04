@@ -6,6 +6,7 @@ import { createPool } from "../db/pool.mjs";
 import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./auth.mjs";
 import { ensureDemo } from "./demo.mjs";
 import { ensureSeed } from "./seed.mjs";
+import { registerWrites } from "./writes.mjs";
 
 const DOCUMENT_KINDS = [
   "sale",
@@ -507,7 +508,7 @@ app.get("/api/dsr", wrap(async (req, res) => {
 app.get("/api/shifts", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const status = req.query.status;
-  if (status && !["upcoming", "open", "closed", "approved", "rejected"].includes(status)) {
+  if (status && !["upcoming", "open", "closed"].includes(status)) {
     throw bad("Unknown shift status.");
   }
   const { rows } = await pool.query(
@@ -1089,6 +1090,8 @@ app.get("/api/activity", wrap(async (req, res) => {
     status: row.status,
   })));
 }));
+
+registerWrites(app, { pool, wrap, bad, assertOutlet });
 
 app.use((error, _req, res, _next) => {
   const status = error.status || 500;

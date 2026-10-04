@@ -163,14 +163,14 @@ export async function ensureDemo(pool) {
       const row = await client.query(
         `INSERT INTO shifts (outlet_id, label, starts_at, ends_at, status, expected_cash, declared_cash, closed_by, approved_by, investigation, investigation_note)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING id`,
-        [outletId, label, start, end, status, expected, declared, closedBy ? ids[closedBy] : null, approvedBy ? ids[approvedBy] : null, status === "approved" && declared != null && expected - declared > 0 ? "open" : null, status === "approved" ? "Drawer short. Proof requested from cashier." : null],
+        [outletId, label, start, end, status, expected, declared, closedBy ? ids[closedBy] : null, approvedBy ? ids[approvedBy] : null, status === "closed" && declared != null && expected - declared > 0 ? "open" : null, status === "closed" ? "Drawer short. Proof requested from cashier." : null],
       );
       ids[key] = row.rows[0].id;
     }
-    await shift("sh-w-y", wfd.id, "Evening", at(14, 0, -1), at(22, 0, -1), "approved", 186400, 185900, "ravi", "meera");
+    await shift("sh-w-y", wfd.id, "Evening", at(14, 0, -1), at(22, 0, -1), "closed", 186400, 185900, "ravi", "meera");
     await shift("sh-w", wfd.id, "Morning", at(6, 0), at(14, 0), "open", 94250, null, null, null);
     await shift("sh-w-n", wfd.id, "Evening", at(14, 0), at(22, 0), "upcoming", 0, null, null, null);
-    await shift("sh-t-y", tng.id, "Evening", at(14, 0, -1), at(22, 0, -1), "approved", 76400, 76000, "priya", "owner");
+    await shift("sh-t-y", tng.id, "Evening", at(14, 0, -1), at(22, 0, -1), "closed", 76400, 76000, "priya", "owner");
     await shift("sh-t", tng.id, "Morning", at(6, 0), at(14, 0), "open", 41200, null, null, null);
     await shift("sh-t-n", tng.id, "Evening", at(14, 0), at(22, 0), "upcoming", 0, null, null, null);
 
