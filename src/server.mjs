@@ -62,6 +62,7 @@ function partyDto(row, extra = {}) {
     altPhone: row.alt_phone,
     email: row.email,
     designation: row.designation,
+    employeeCode: row.employee_code,
     permissionGrants: row.permission_grants ?? [],
     permissionRevokes: row.permission_revokes ?? [],
     managerCanAssign: row.manager_can_assign,
@@ -167,7 +168,7 @@ function bad(message, status = 400) {
 
 const app = express();
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "2mb" }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -211,19 +212,22 @@ app.get("/api/dealer", wrap(async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM settings WHERE id = $1`, [settingsId]);
   const dealer = rows[0];
   if (!dealer) throw bad("Dealer not found.", 404);
+  const withImages = req.query.images === "1";
   res.json({
     id: dealer.id,
     autoApproveBelow: num(dealer.auto_approve_below),
     varianceAlert: num(dealer.variance_alert),
     auditorCanFileFindings: dealer.auditor_can_file_findings,
     schedules: dealer.schedules ?? [],
+    companyImage: withImages ? dealer.company_image || null : null,
+    bannerImage: withImages ? dealer.banner_image || null : null,
   });
 }));
 
 app.get("/api/outlets", wrap(async (req, res) => {
   const ids = await outletIdsFor(pool, req.user);
   const { rows } = await pool.query(
-    `SELECT id, name, code FROM outlets WHERE id = ANY($1::uuid[]) ORDER BY name`,
+    `SELECT id, name, code, brand FROM outlets WHERE id = ANY($1::uuid[]) ORDER BY name`,
     [ids],
   );
   res.json(rows);

@@ -124,17 +124,25 @@ CREATE TABLE IF NOT EXISTS settings (
   variance_alert numeric(14, 2) NOT NULL DEFAULT 200,
   auditor_can_file_findings boolean NOT NULL DEFAULT false,
   schedules jsonb NOT NULL DEFAULT '[]'::jsonb,
+  company_image text,
+  banner_image text,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS company_image text;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS banner_image text;
 
 CREATE TABLE IF NOT EXISTS outlets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   settings_id uuid NOT NULL REFERENCES settings (id),
   name text NOT NULL,
   code text NOT NULL,
+  brand text,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (settings_id, code)
 );
+
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS brand text;
 
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -149,6 +157,7 @@ CREATE TABLE IF NOT EXISTS users (
   password_hash text,
   desk_code text,
   designation text,
+  employee_code text,
   permission_grants text[] NOT NULL DEFAULT '{}',
   permission_revokes text[] NOT NULL DEFAULT '{}',
   manager_can_assign boolean NOT NULL DEFAULT false,
@@ -169,6 +178,12 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE UNIQUE INDEX IF NOT EXISTS users_settings_phone_uidx
   ON users (settings_id, phone)
   WHERE phone IS NOT NULL AND phone <> '';
+
+ALTER TABLE users ADD COLUMN IF NOT EXISTS employee_code text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS users_settings_employee_code_uidx
+  ON users (settings_id, lower(employee_code))
+  WHERE employee_code IS NOT NULL AND employee_code <> '';
 
 CREATE TABLE IF NOT EXISTS products (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -495,3 +510,24 @@ CREATE INDEX IF NOT EXISTS documents_shift_idx ON documents (shift_id);
 CREATE INDEX IF NOT EXISTS document_items_document_idx ON document_items (document_id);
 CREATE INDEX IF NOT EXISTS attendance_user_idx ON attendance (user_id, check_in);
 CREATE INDEX IF NOT EXISTS activity_outlet_idx ON activity (outlet_id, at);
+
+CREATE TABLE IF NOT EXISTS billing (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  settings_id uuid NOT NULL REFERENCES settings (id),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  bill_no text NOT NULL,
+  billed_at timestamptz NOT NULL DEFAULT now(),
+  customer_name text,
+  vehicle_no text,
+  mobile text,
+  payment_mode text NOT NULL DEFAULT 'Cash',
+  pump_nozzle text,
+  attendant text,
+  lines jsonb NOT NULL DEFAULT '[]'::jsonb,
+  total numeric(14, 2) NOT NULL DEFAULT 0,
+  created_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (outlet_id, bill_no)
+);
+
+CREATE INDEX IF NOT EXISTS billing_outlet_idx ON billing (outlet_id, billed_at DESC);

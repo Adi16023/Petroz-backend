@@ -59,6 +59,21 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     );
   }
 
+  async function takeEmployeeCode(settingsId, code, exceptId) {
+    const value = String(code ?? "").trim();
+    if (!value) return null;
+    const taken = await pool.query(
+      `SELECT id FROM users
+       WHERE settings_id = $1
+         AND lower(employee_code) = lower($2)
+         AND ($3::uuid IS NULL OR id <> $3)
+       LIMIT 1`,
+      [settingsId, value, exceptId ?? null],
+    );
+    if (taken.rows.length) throw bad("That employee ID is already used.");
+    return value;
+  }
+
   async function partyId(user, outletId, name, explicitId) {
     if (explicitId) return explicitId;
     const label = String(name ?? "").trim();
@@ -369,12 +384,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         designation = role === "manager" ? "Manager" : STAFF_LABEL[staffType];
       }
     }
+    const employeeCode = await takeEmployeeCode(outlet.settings_id, req.body?.employeeCode);
     const { rows } = await pool.query(
       `INSERT INTO users (
          settings_id, outlet_id, role, name, phone, alt_phone, email, address, gstin,
          customer_type, vehicle, credit_limit, credit_period_days, credit_status, designation,
-         staff_type, password_hash, bank_name, account_no
-       ) VALUES ($1,$2,$3::user_role,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'clear',$14,$15::staff_type,$16,$17,$18)
+         staff_type, password_hash, bank_name, account_no, employee_code
+       ) VALUES ($1,$2,$3::user_role,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'clear',$14,$15::staff_type,$16,$17,$18,$19)
        RETURNING id`,
       [
         outlet.settings_id, outlet.id, role, name, req.body?.phone || null, req.body?.altPhone || null,
@@ -382,6 +398,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         req.body?.vehicle || null, req.body?.creditLimit == null ? null : money(req.body.creditLimit),
         req.body?.creditPeriodDays == null ? null : Number(req.body.creditPeriodDays) || null,
         designation, staffType, passwordHash, req.body?.bankName || null, req.body?.accountNo || null,
+        employeeCode,
       ],
     );
     const id = rows[0].id;
@@ -391,26 +408,45 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
 
   app.patch("/api/parties/:id", wrap(async (req, res) => {
     const { rows } = await pool.query(
-      `SELECT id, outlet_id FROM users WHERE id = $1 AND ($2::uuid IS NULL OR settings_id = $2)`,
+      `SELECT id, outlet_id, settings_id, role FROM users WHERE id = $1 AND ($2::uuid IS NULL OR settings_id = $2)`,
       [req.params.id, req.user.role === "super_admin" ? null : req.user.settings_id],
     );
     const row = rows[0];
     if (!row) throw bad("Party not found.", 404);
     if (row.outlet_id) await assertOutlet(pool, req.user, row.outlet_id);
+    const touchesCode = req.body != null && Object.prototype.hasOwnProperty.call(req.body, "employeeCode");
+    let employeeCode = null;
+    if (touchesCode) {
+      if (!["owner", "super_admin", "manager"].includes(req.user.role)) throw bad("You cannot edit the employee ID.", 403);
+      if (!["staff", "manager"].includes(row.role)) throw bad("Employee ID is for staff.");
+      employeeCode = await takeEmployeeCode(row.settings_id, req.body.employeeCode, row.id);
+    }
     await pool.query(
       `UPDATE users SET
          permission_grants = COALESCE($2::text[], permission_grants),
          permission_revokes = COALESCE($3::text[], permission_revokes),
-         manager_can_assign = COALESCE($4, manager_can_assign)
+         manager_can_assign = COALESCE($4, manager_can_assign),
+         employee_code = CASE WHEN $5 THEN $6 ELSE employee_code END
        WHERE id = $1`,
       [
         row.id,
         Array.isArray(req.body?.permissionGrants) ? req.body.permissionGrants : null,
         Array.isArray(req.body?.permissionRevokes) ? req.body.permissionRevokes : null,
         req.body?.managerCanAssign == null ? null : Boolean(req.body.managerCanAssign),
+        touchesCode,
+        employeeCode,
       ],
     );
-    await log(req.user, row.outlet_id, "permission", req.body?.detail || "Permissions updated", "users", row.id);
+    await log(
+      req.user,
+      row.outlet_id,
+      touchesCode && !Array.isArray(req.body?.permissionGrants) ? "updated" : "permission",
+      touchesCode && !Array.isArray(req.body?.permissionGrants)
+        ? `Employee ID ${employeeCode || "cleared"}`
+        : (req.body?.detail || "Permissions updated"),
+      "users",
+      row.id,
+    );
     res.json({ id: row.id });
   }));
 
@@ -683,7 +719,150 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     res.json({ id: shift.id });
   }));
 
+  function storedImage(value, label) {
+    if (value == null || value === "") return null;
+    const text = String(value);
+    if (!/^data:image\/(png|jpeg|webp);base64,[A-Za-z0-9+/=]+$/.test(text)) {
+      throw bad(`${label} needs a PNG or JPG.`);
+    }
+    if (text.length > 700_000) throw bad(`${label} is too large. Use the size shown on Settings.`);
+    return text;
+  }
+
+  function billLines(body) {
+    const fuels = ["Petrol", "Diesel", "Power"];
+    const raw = Array.isArray(body?.lines) ? body.lines : [];
+    const lines = raw.map((line) => {
+      const fuel = fuels.includes(line?.fuel) ? line.fuel : "";
+      const qty = money(line?.qty);
+      const rate = money(line?.rate);
+      const discount = money(line?.discount);
+      if (!fuel) throw bad("Pick a fuel type.");
+      if (!(qty > 0)) throw bad("Enter the litres.");
+      if (rate < 0 || discount < 0) throw bad("Rate and discount stay at zero or above.");
+      const amount = Math.max(0, Math.round((qty * rate - discount) * 100) / 100);
+      return { fuel, qty, rate, discount, amount };
+    });
+    if (!lines.length) throw bad("Add a fuel line.");
+    return lines;
+  }
+
+  function billDto(row) {
+    return {
+      id: row.id,
+      outletId: row.outlet_id,
+      billNo: row.bill_no,
+      billedAt: row.billed_at,
+      customerName: row.customer_name,
+      vehicleNo: row.vehicle_no,
+      mobile: row.mobile,
+      paymentMode: row.payment_mode,
+      pumpNozzle: row.pump_nozzle,
+      attendant: row.attendant,
+      lines: row.lines ?? [],
+      total: Number(row.total) || 0,
+    };
+  }
+
+  async function nextBillNo(outlet) {
+    const { rows } = await pool.query(
+      `SELECT COALESCE(MAX(NULLIF(split_part(bill_no, '-', 2), '')::int), 0) + 1 AS n
+       FROM billing WHERE outlet_id = $1`,
+      [outlet.id],
+    );
+    return `${outlet.code}-${String(rows[0].n).padStart(5, "0")}`;
+  }
+
+  app.get("/api/billing", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+    const { rows } = await pool.query(
+      `SELECT * FROM billing WHERE outlet_id = $1 ORDER BY billed_at DESC LIMIT 200`,
+      [outlet.id],
+    );
+    const { rows: brand } = await pool.query(
+      `SELECT company_image, banner_image FROM settings WHERE id = $1`,
+      [outlet.settings_id],
+    );
+    res.json({
+      stationName: outlet.name,
+      nextBillNo: await nextBillNo(outlet),
+      companyImage: brand[0]?.company_image || null,
+      bannerImage: brand[0]?.banner_image || null,
+      bills: rows.map(billDto),
+    });
+  }));
+
+  app.post("/api/billing", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const lines = billLines(req.body);
+    const modes = ["Cash", "UPI", "Card", "Credit"];
+    const paymentMode = modes.includes(req.body?.paymentMode) ? req.body.paymentMode : "Cash";
+    const billedAt = req.body?.billedAt ? new Date(req.body.billedAt) : new Date();
+    if (Number.isNaN(billedAt.getTime())) throw bad("Pick a date and time.");
+    const total = Math.round(lines.reduce((sum, line) => sum + line.amount, 0) * 100) / 100;
+    const billNo = await nextBillNo(outlet);
+    let rows;
+    try {
+      ({ rows } = await pool.query(
+        `INSERT INTO billing (
+           settings_id, outlet_id, bill_no, billed_at, customer_name, vehicle_no, mobile,
+           payment_mode, pump_nozzle, attendant, lines, total, created_by
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+         RETURNING *`,
+        [
+          outlet.settings_id,
+          outlet.id,
+          billNo,
+          billedAt.toISOString(),
+          String(req.body?.customerName ?? "").trim() || null,
+          String(req.body?.vehicleNo ?? "").trim() || null,
+          String(req.body?.mobile ?? "").trim() || null,
+          paymentMode,
+          String(req.body?.pumpNozzle ?? "").trim() || null,
+          String(req.body?.attendant ?? "").trim() || null,
+          JSON.stringify(lines),
+          total,
+          req.user.id,
+        ],
+      ));
+    } catch (error) {
+      if (error.code === "23505") throw bad("That bill number was just used. Save again.");
+      throw error;
+    }
+    await log(req.user, outlet.id, "created", `Bill ${billNo}`, "billing", rows[0].id);
+    res.status(201).json({ bill: billDto(rows[0]), nextBillNo: await nextBillNo(outlet) });
+  }));
+
+  const FUEL_BRANDS = ["iocl", "bpcl", "hpcl", "nayara", "jio-bp", "shell", "reliance", "mrpl"];
+
+  app.patch("/api/outlets/:id", wrap(async (req, res) => {
+    if (req.user.role !== "owner" && req.user.role !== "super_admin") {
+      throw bad("The dealer sets the company.", 403);
+    }
+    const outlet = await assertOutlet(pool, req.user, req.params.id);
+    const brand = String(req.body?.brand ?? "").trim();
+    if (brand && !FUEL_BRANDS.includes(brand)) throw bad("Pick a company from the list.");
+    await pool.query(`UPDATE outlets SET brand = $2 WHERE id = $1`, [outlet.id, brand || null]);
+    await log(req.user, outlet.id, "updated", brand ? `Company set to ${brand}` : "Company cleared", "outlets", outlet.id);
+    res.json({ id: outlet.id, brand: brand || null });
+  }));
+
   app.patch("/api/dealer", wrap(async (req, res) => {
+    const hasCompany = req.body != null && Object.prototype.hasOwnProperty.call(req.body, "companyImage");
+    const hasBanner = req.body != null && Object.prototype.hasOwnProperty.call(req.body, "bannerImage");
+    if (hasCompany || hasBanner) {
+      if (req.user.role !== "owner") throw bad("The dealer saves the bill images.", 403);
+      if (!req.user.settings_id) throw bad("Pick a dealer first.");
+      const company = hasCompany ? storedImage(req.body.companyImage, "Company image") : null;
+      const banner = hasBanner ? storedImage(req.body.bannerImage, "Banner image") : null;
+      await pool.query(
+        `UPDATE settings SET
+           company_image = CASE WHEN $2 THEN $3 ELSE company_image END,
+           banner_image = CASE WHEN $4 THEN $5 ELSE banner_image END
+         WHERE id = $1`,
+        [req.user.settings_id, hasCompany, company, hasBanner, banner],
+      );
+    }
     if (req.body?.auditorCanFileFindings != null) {
       await pool.query(
         `UPDATE settings SET auditor_can_file_findings = $2 WHERE id = $1`,
