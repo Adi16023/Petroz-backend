@@ -94,7 +94,11 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       "transfer", "settlement", "expense", "expense_schedule", "salary", "adjustment", "dsr",
     ];
     if (!allowed.includes(kind)) throw bad("Unknown document kind.");
-    const status = req.body?.status && STATUSES.includes(req.body.status) ? req.body.status : "open";
+    let status = req.body?.status && STATUSES.includes(req.body.status) ? req.body.status : "open";
+    if (kind === "expense") {
+      if (["owner", "manager", "super_admin"].includes(req.user.role)) status = "approved";
+      else if (req.user.role === "staff") status = "pending";
+    }
     const amount = money(req.body?.amount);
     const charges = money(req.body?.charges);
     const net = req.body?.net == null || req.body?.net === "" ? amount : money(req.body.net);
