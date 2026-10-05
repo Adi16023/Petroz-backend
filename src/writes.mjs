@@ -1,4 +1,15 @@
+import bcrypt from "bcryptjs";
+
 const PAY_MODES = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
+const STAFF_TYPES = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
+const STAFF_LABEL = {
+  cashier: "Cashier",
+  pump_boy: "Pump operator",
+  supervisor: "Supervisor",
+  air_boy: "Air boy",
+  dsm: "Dealer salesman",
+  custom: "Staff",
+};
 const STATUSES = [
   "draft", "open", "partial", "approved", "rejected", "paid", "pending",
   "settled", "difference", "failed", "reversed", "cancelled", "locked",
@@ -328,23 +339,50 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const role = req.body?.role ?? "credit_customer";
     const roles = ["manager", "staff", "credit_customer", "supplier", "bank", "provider"];
     if (!roles.includes(role)) throw bad("Unknown role.");
+    let staffType = null;
+    let passwordHash = null;
+    let designation = req.body?.designation || null;
+    if (role === "staff" || role === "manager") {
+      if (!["owner", "super_admin"].includes(req.user.role)) throw bad("You cannot add staff.", 403);
+      const digits = String(req.body?.phone ?? "").replace(/\D/g, "");
+      if (!digits) throw bad("Mobile is required.");
+      const password = String(req.body?.password ?? "");
+      if (password.length < 4) throw bad("Password must be at least 4 characters.");
+      if (role === "staff") {
+        staffType = String(req.body?.staffType ?? "");
+        if (!STAFF_TYPES.includes(staffType)) throw bad("Pick a staff type.");
+      }
+      const taken = await pool.query(
+        `SELECT id FROM users
+         WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+           AND active = true
+           AND role = ANY($2::user_role[])`,
+        [digits, ["super_admin", "owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor"]],
+      );
+      if (taken.rows.length) throw bad("That mobile is already in use.");
+      passwordHash = await bcrypt.hash(password, 10);
+      if (!String(designation ?? "").trim()) {
+        designation = role === "manager" ? "Manager" : STAFF_LABEL[staffType];
+      }
+    }
     const { rows } = await pool.query(
       `INSERT INTO users (
          settings_id, outlet_id, role, name, phone, alt_phone, email, address, gstin,
-         customer_type, vehicle, credit_limit, credit_period_days, credit_status, designation
-       ) VALUES ($1,$2,$3::user_role,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'clear',$14)
+         customer_type, vehicle, credit_limit, credit_period_days, credit_status, designation,
+         staff_type, password_hash, bank_name, account_no
+       ) VALUES ($1,$2,$3::user_role,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'clear',$14,$15::staff_type,$16,$17,$18)
        RETURNING id`,
       [
         outlet.settings_id, outlet.id, role, name, req.body?.phone || null, req.body?.altPhone || null,
         req.body?.email || null, req.body?.address || null, req.body?.gstin || null, req.body?.customerType || null,
         req.body?.vehicle || null, req.body?.creditLimit == null ? null : money(req.body.creditLimit),
         req.body?.creditPeriodDays == null ? null : Number(req.body.creditPeriodDays) || null,
-        req.body?.designation || null,
+        designation, staffType, passwordHash, req.body?.bankName || null, req.body?.accountNo || null,
       ],
     );
     const id = rows[0].id;
     await log(req.user, outlet.id, "created", name, "users", id);
-    res.status(201).json({ id });
+    res.status(201).json({ id, canSignIn: role === "staff" || role === "manager" });
   }));
 
   app.patch("/api/parties/:id", wrap(async (req, res) => {
@@ -515,14 +553,41 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     }
     const now = Date.now();
     const status = now >= endMs ? "closed" : now >= startMs ? "open" : "upcoming";
+    const startIso = new Date(startMs).toISOString();
+    const endIso = new Date(endMs).toISOString();
+    const requested = Array.isArray(req.body?.staffIds) ? [...new Set(req.body.staffIds.map((id) => String(id)))] : [];
+    if (requested.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
+      throw bad("Pick staff from this outlet.");
+    }
+    let duties = [];
+    if (requested.length) {
+      const found = await pool.query(
+        `SELECT id FROM users
+         WHERE id = ANY($1::uuid[])
+           AND settings_id = $2
+           AND role IN ('staff', 'manager')
+           AND active = true
+           AND (outlet_id IS NULL OR outlet_id = $3)`,
+        [requested, outlet.settings_id, outlet.id],
+      );
+      if (found.rows.length !== requested.length) throw bad("Pick staff from this outlet.");
+      duties = found.rows.map((row) => ({
+        id: crypto.randomUUID(),
+        userId: row.id,
+        nozzleId: null,
+        windowStart: startIso,
+        windowEnd: endIso,
+        checkedOutAt: null,
+      }));
+    }
     const { rows } = await pool.query(
-      `INSERT INTO shifts (outlet_id, label, starts_at, ends_at, status)
-       VALUES ($1, $2, $3, $4, $5::shift_status)
+      `INSERT INTO shifts (outlet_id, label, starts_at, ends_at, status, duties)
+       VALUES ($1, $2, $3, $4, $5::shift_status, $6::jsonb)
        RETURNING id`,
-      [outlet.id, label, new Date(startMs).toISOString(), new Date(endMs).toISOString(), status],
+      [outlet.id, label, startIso, endIso, status, JSON.stringify(duties)],
     );
     await log(req.user, outlet.id, "shift", `Opened ${label}`, "shifts", rows[0].id);
-    res.status(201).json({ id: rows[0].id });
+    res.status(201).json({ id: rows[0].id, staffIds: duties.map((duty) => duty.userId) });
   }));
 
   app.delete("/api/shifts/:id", wrap(async (req, res) => {
