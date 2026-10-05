@@ -24,7 +24,8 @@ DO $$ BEGIN
     'accounts_auditor',
     'supplier',
     'bank',
-    'provider'
+    'provider',
+    'super_admin'
   );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;
@@ -137,7 +138,7 @@ CREATE TABLE IF NOT EXISTS outlets (
 
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  settings_id uuid NOT NULL REFERENCES settings (id),
+  settings_id uuid REFERENCES settings (id),
   outlet_id uuid REFERENCES outlets (id),
   role user_role NOT NULL,
   staff_type staff_type,

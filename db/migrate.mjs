@@ -13,6 +13,19 @@ function directUrl(url) {
   return url.includes("-pooler.") ? url.replace("-pooler.", ".") : url;
 }
 
+async function addSuperAdminRole(client) {
+  const type = await client.query(`SELECT 1 FROM pg_type WHERE typname = 'user_role'`);
+  if (!type.rows.length) return;
+  const has = await client.query(
+    `SELECT 1
+     FROM pg_enum e
+     JOIN pg_type t ON t.oid = e.enumtypid
+     WHERE t.typname = 'user_role' AND e.enumlabel = 'super_admin'`,
+  );
+  if (has.rows.length) return;
+  await client.query(`ALTER TYPE user_role ADD VALUE 'super_admin'`);
+}
+
 export async function migrate() {
   const pool = new pg.Pool({
     connectionString: directUrl(process.env.DATABASE_URL),
@@ -20,6 +33,13 @@ export async function migrate() {
     max: 1,
   });
   const client = await pool.connect();
+  try {
+    await addSuperAdminRole(client);
+  } catch (error) {
+    client.release();
+    await pool.end();
+    throw error;
+  }
   try {
     await client.query("BEGIN");
     await client.query(reshape);

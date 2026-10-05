@@ -1,11 +1,12 @@
 import "dotenv/config";
+import bcrypt from "bcryptjs";
 import express from "express";
 import cors from "cors";
 import { migrate } from "../db/migrate.mjs";
 import { createPool } from "../db/pool.mjs";
 import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./auth.mjs";
 import { ensureDemo } from "./demo.mjs";
-import { ensureSeed } from "./seed.mjs";
+import { ensureSeed, ensureSuperAdmin } from "./seed.mjs";
 import { registerWrites } from "./writes.mjs";
 
 const DOCUMENT_KINDS = [
@@ -192,7 +193,22 @@ app.get("/api/me", wrap(async (req, res) => {
 }));
 
 app.get("/api/dealer", wrap(async (req, res) => {
-  const { rows } = await pool.query(`SELECT * FROM settings WHERE id = $1`, [req.user.settings_id]);
+  let settingsId = req.user.settings_id;
+  if (req.query.outletId) {
+    const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+    settingsId = outlet.settings_id;
+  }
+  if (!settingsId) {
+    res.json({
+      id: null,
+      autoApproveBelow: 500,
+      varianceAlert: 200,
+      auditorCanFileFindings: false,
+      schedules: [],
+    });
+    return;
+  }
+  const { rows } = await pool.query(`SELECT * FROM settings WHERE id = $1`, [settingsId]);
   const dealer = rows[0];
   if (!dealer) throw bad("Dealer not found.", 404);
   res.json({
@@ -213,9 +229,95 @@ app.get("/api/outlets", wrap(async (req, res) => {
   res.json(rows);
 }));
 
+function requireSuper(user) {
+  if (user.role !== "super_admin") {
+    const error = new Error("Only a super admin can do that.");
+    error.status = 403;
+    throw error;
+  }
+}
+
+app.get("/api/dealers", wrap(async (req, res) => {
+  requireSuper(req.user);
+  const { rows } = await pool.query(
+    `SELECT u.id, u.name, u.phone, u.email, u.created_at,
+            COALESCE(
+              json_agg(json_build_object('id', o.id, 'name', o.name, 'code', o.code) ORDER BY o.name)
+                FILTER (WHERE o.id IS NOT NULL),
+              '[]'
+            ) AS outlets
+     FROM users u
+     LEFT JOIN outlets o ON o.settings_id = u.settings_id
+     WHERE u.role = 'owner'
+     GROUP BY u.id
+     ORDER BY u.name`,
+  );
+  res.json(rows.map((row) => ({
+    id: row.id,
+    name: row.name,
+    phone: row.phone,
+    email: row.email,
+    createdAt: row.created_at,
+    outlets: row.outlets ?? [],
+  })));
+}));
+
+app.post("/api/dealers", wrap(async (req, res) => {
+  requireSuper(req.user);
+  const name = String(req.body?.name ?? "").trim();
+  const phone = String(req.body?.phone ?? "").trim();
+  const email = String(req.body?.email ?? "").trim();
+  const password = String(req.body?.password ?? "");
+  const digits = phone.replace(/\D/g, "");
+  if (!name) throw bad("Name is required.");
+  if (!digits) throw bad("Mobile is required.");
+  if (password.length < 4) throw bad("Password must be at least 4 characters.");
+  const taken = await pool.query(
+    `SELECT id FROM users
+     WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+       AND active = true
+       AND role = ANY($2::user_role[])`,
+    [digits, ["super_admin", "owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor"]],
+  );
+  if (taken.rows.length) throw bad("That mobile is already in use.");
+  const hash = await bcrypt.hash(password, 10);
+  const code = (name.replace(/[^a-z]/gi, "").toUpperCase().slice(0, 3) || "OUT");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const settings = await client.query(
+      `INSERT INTO settings (auto_approve_below, variance_alert) VALUES (500, 200) RETURNING id`,
+    );
+    const settingsId = settings.rows[0].id;
+    const outlet = await client.query(
+      `INSERT INTO outlets (settings_id, name, code) VALUES ($1, $2, $3) RETURNING id`,
+      [settingsId, name, code],
+    );
+    const user = await client.query(
+      `INSERT INTO users (
+         settings_id, outlet_id, role, name, phone, email, password_hash, designation, active
+       ) VALUES ($1, NULL, 'owner', $2, $3, $4, $5, 'Dealer', true)
+       RETURNING id`,
+      [settingsId, name, phone, email || null, hash],
+    );
+    await client.query(
+      `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+       VALUES ($1, $2, 'created', $3, 'users', $4)`,
+      [outlet.rows[0].id, req.user.id, `Dealer ${name}`, user.rows[0].id],
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ id: user.rows[0].id, outletId: outlet.rows[0].id });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.get("/api/notifications", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
-  const dealer = await pool.query(`SELECT variance_alert FROM settings WHERE id = $1`, [req.user.settings_id]);
+  const dealer = await pool.query(`SELECT variance_alert FROM settings WHERE id = $1`, [outlet.settings_id]);
   const alertAt = num(dealer.rows[0]?.variance_alert) ?? 200;
   const [shifts, attendance, expenses, tanks, credit, deposits, settlements, stock, dips] = await Promise.all([
     pool.query(`SELECT * FROM shifts WHERE outlet_id = $1`, [outlet.id]),
@@ -656,7 +758,7 @@ app.get("/api/products", wrap(async (req, res) => {
      LEFT JOIN balances b ON b.product_id = pr.id AND b.outlet_id = $1
      WHERE pr.settings_id = $2
      ORDER BY pr.kind, pr.name`,
-    [outlet.id, req.user.settings_id],
+    [outlet.id, outlet.settings_id],
   );
   res.json(rows.map((row) => ({
     id: row.id,
@@ -681,7 +783,7 @@ app.get("/api/products/:id", wrap(async (req, res) => {
      FROM products pr
      LEFT JOIN balances b ON b.product_id = pr.id AND b.outlet_id = $2
      WHERE pr.id = $1 AND pr.settings_id = $3`,
-    [req.params.id, outlet.id, req.user.settings_id],
+    [req.params.id, outlet.id, outlet.settings_id],
   );
   const row = product.rows[0];
   if (!row) throw bad("Product not found.", 404);
@@ -793,7 +895,7 @@ app.get("/api/parties", wrap(async (req, res) => {
        AND (u.outlet_id IS NULL OR u.outlet_id = $1)
        AND ($3::user_role IS NULL OR u.role = $3::user_role)
      ORDER BY u.name`,
-    [outlet.id, req.user.settings_id, role],
+    [outlet.id, outlet.settings_id, role],
   );
   const extras = await creditExtras(outlet.id);
   res.json(rows.map((row) => withCredit(row, extras)));
@@ -809,14 +911,14 @@ app.get("/api/parties/:id", wrap(async (req, res) => {
               ELSE ARRAY[u.outlet_id]
             END AS outlet_ids
      FROM users u
-     WHERE u.id = $1 AND u.settings_id = $2`,
-    [req.params.id, req.user.settings_id],
+     WHERE u.id = $1 AND ($2::uuid IS NULL OR u.settings_id = $2)`,
+    [req.params.id, req.user.role === "super_admin" ? null : req.user.settings_id],
   );
   const row = rows[0];
   if (!row) throw bad("Party not found.", 404);
   const allowed = await outletIdsFor(pool, req.user);
   const shared = (row.outlet_ids ?? []).filter((id) => allowed.includes(id));
-  if (!shared.length && req.user.role !== "owner") throw bad("Party not found.", 404);
+  if (!shared.length && req.user.role !== "owner" && req.user.role !== "super_admin") throw bad("Party not found.", 404);
   const outletId = req.query.outletId || shared[0] || allowed[0];
   if (outletId) await assertOutlet(pool, req.user, outletId);
   const extras = outletId ? await creditExtras(outletId) : new Map();
@@ -1107,6 +1209,8 @@ if (!process.env.JWT_SECRET) {
 await migrate();
 const seed = await ensureSeed(pool);
 if (seed.seeded) console.log("Seeded one dealer and two outlets.");
+const superAdmin = await ensureSuperAdmin(pool);
+if (superAdmin.seeded) console.log("Seeded super admin.");
 const demo = await ensureDemo(pool);
 if (demo.seeded) console.log("Loaded desk data for both outlets.");
 

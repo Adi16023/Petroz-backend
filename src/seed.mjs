@@ -38,3 +38,20 @@ export async function ensureSeed(pool) {
     client.release();
   }
 }
+
+export async function ensureSuperAdmin(pool) {
+  const existing = await pool.query(`SELECT id FROM users WHERE role = 'super_admin' LIMIT 1`);
+  if (existing.rows.length) return { seeded: false };
+
+  const phone = process.env.SEED_SUPER_PHONE || "7558118534";
+  const password = process.env.SEED_SUPER_PASSWORD || "1234";
+  const name = process.env.SEED_SUPER_NAME || "Super admin";
+  const passwordHash = await bcrypt.hash(password, 10);
+  await pool.query(
+    `INSERT INTO users (
+       settings_id, outlet_id, role, name, phone, email, password_hash, designation, active
+     ) VALUES (NULL, NULL, 'super_admin', $1, $2, $3, $4, 'Super admin', true)`,
+    [name, phone, "admin@petroz.in", passwordHash],
+  );
+  return { seeded: true };
+}

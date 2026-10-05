@@ -329,7 +329,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
        ) VALUES ($1,$2,$3::user_role,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,'clear',$14)
        RETURNING id`,
       [
-        req.user.settings_id, outlet.id, role, name, req.body?.phone || null, req.body?.altPhone || null,
+        outlet.settings_id, outlet.id, role, name, req.body?.phone || null, req.body?.altPhone || null,
         req.body?.email || null, req.body?.address || null, req.body?.gstin || null, req.body?.customerType || null,
         req.body?.vehicle || null, req.body?.creditLimit == null ? null : money(req.body.creditLimit),
         req.body?.creditPeriodDays == null ? null : Number(req.body.creditPeriodDays) || null,
@@ -343,8 +343,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
 
   app.patch("/api/parties/:id", wrap(async (req, res) => {
     const { rows } = await pool.query(
-      `SELECT id, outlet_id FROM users WHERE id = $1 AND settings_id = $2`,
-      [req.params.id, req.user.settings_id],
+      `SELECT id, outlet_id FROM users WHERE id = $1 AND ($2::uuid IS NULL OR settings_id = $2)`,
+      [req.params.id, req.user.role === "super_admin" ? null : req.user.settings_id],
     );
     const row = rows[0];
     if (!row) throw bad("Party not found.", 404);
@@ -376,7 +376,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
        VALUES ($1, $2::product_kind, $3, $4, $5, $6, $7, $8, $9, $10)
        RETURNING id`,
       [
-        req.user.settings_id, kind, name, req.body?.brand || null, req.body?.code || null, req.body?.hsn || null,
+        outlet.settings_id, kind, name, req.body?.brand || null, req.body?.code || null, req.body?.hsn || null,
         req.body?.unit || null, money(req.body?.gst), money(req.body?.purchasePrice), money(req.body?.sellingPrice),
       ],
     );

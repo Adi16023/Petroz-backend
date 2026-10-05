@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
 
 const LOGIN_ROLES = [
+  "super_admin",
   "owner",
   "manager",
   "staff",
@@ -71,6 +72,10 @@ export async function login(pool, phone, password) {
 }
 
 export async function outletIdsFor(pool, user) {
+  if (user.role === "super_admin") {
+    const { rows } = await pool.query(`SELECT id FROM outlets ORDER BY name`);
+    return rows.map((row) => row.id);
+  }
   if (!user.outlet_id || user.role === "owner" || user.role === "auditor" || user.role === "accounts_auditor") {
     const { rows } = await pool.query(
       `SELECT id FROM outlets WHERE settings_id = $1 ORDER BY name`,
@@ -92,7 +97,13 @@ export async function assertOutlet(pool, user, outletId) {
     [outletId],
   );
   const outlet = rows[0];
-  if (!outlet || outlet.settings_id !== user.settings_id) {
+  if (!outlet) {
+    const error = new Error("Outlet not found.");
+    error.status = 404;
+    throw error;
+  }
+  if (user.role === "super_admin") return outlet;
+  if (outlet.settings_id !== user.settings_id) {
     const error = new Error("Outlet not found.");
     error.status = 404;
     throw error;
