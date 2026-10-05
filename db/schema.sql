@@ -252,6 +252,7 @@ CREATE TABLE IF NOT EXISTS shifts (
   investigation investigation_status,
   investigation_note text,
   duties jsonb NOT NULL DEFAULT '[]'::jsonb,
+  entry jsonb NOT NULL DEFAULT '{}'::jsonb,
   created_at timestamptz NOT NULL DEFAULT now()
 );
 
@@ -306,7 +307,8 @@ CREATE TABLE IF NOT EXISTS sale_items (
   description text,
   qty numeric(14, 3) NOT NULL DEFAULT 0,
   rate numeric(14, 4) NOT NULL DEFAULT 0,
-  amount numeric(14, 2) NOT NULL DEFAULT 0
+  amount numeric(14, 2) NOT NULL DEFAULT 0,
+  test_qty numeric(14, 3) NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS purchases (
@@ -501,12 +503,16 @@ CREATE INDEX IF NOT EXISTS products_settings_idx ON products (settings_id);
 CREATE INDEX IF NOT EXISTS equipment_outlet_idx ON equipment (outlet_id);
 CREATE INDEX IF NOT EXISTS equipment_parent_idx ON equipment (parent_id);
 CREATE INDEX IF NOT EXISTS balances_product_idx ON balances (product_id);
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS entry jsonb NOT NULL DEFAULT '{}'::jsonb;
+
 CREATE INDEX IF NOT EXISTS shifts_outlet_idx ON shifts (outlet_id, starts_at);
 CREATE INDEX IF NOT EXISTS dip_readings_shift_idx ON dip_readings (shift_id);
 CREATE INDEX IF NOT EXISTS dip_readings_equipment_idx ON dip_readings (equipment_id);
 CREATE INDEX IF NOT EXISTS sales_outlet_idx ON sales (outlet_id, doc_date);
 CREATE INDEX IF NOT EXISTS sales_user_idx ON sales (user_id);
 CREATE INDEX IF NOT EXISTS sales_shift_idx ON sales (shift_id);
+ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS test_qty numeric(14, 3) NOT NULL DEFAULT 0;
+
 CREATE INDEX IF NOT EXISTS sale_items_sale_idx ON sale_items (sale_id);
 CREATE INDEX IF NOT EXISTS purchases_outlet_idx ON purchases (outlet_id, doc_date);
 CREATE INDEX IF NOT EXISTS purchases_user_idx ON purchases (user_id);

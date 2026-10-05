@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { registerShiftEntry } from "./shift-entry.mjs";
 
 const PAY_MODES = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
 const STAFF_TYPES = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
@@ -21,6 +22,22 @@ function money(value) {
   if (value == null || value === "") return 0;
   const n = Number(String(value).replace(/[^\d.-]/g, ""));
   return Number.isFinite(n) ? n : 0;
+}
+
+function round2(value) {
+  if (!Number.isFinite(value)) return 0;
+  const negative = value < 0;
+  const [whole, fraction = ""] = Math.abs(value).toFixed(8).split(".");
+  const digits = `${fraction}000`.slice(0, 3);
+  let paise = Number(digits.slice(0, 2));
+  if (Number(digits[2]) >= 5) paise += 1;
+  let rupees = Number(whole);
+  if (paise >= 100) {
+    rupees += 1;
+    paise -= 100;
+  }
+  const rounded = rupees + paise / 100;
+  return negative ? -rounded : rounded;
 }
 
 function payMode(value) {
@@ -110,7 +127,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     ];
     if (!allowed.includes(kind)) throw bad("Unknown document kind.");
     let status = req.body?.status && STATUSES.includes(req.body.status) ? req.body.status : "open";
-    if (kind === "expense") {
+    const isAdvance = kind === "payment" && req.body?.category === "advance";
+    if (kind === "expense" || isAdvance) {
       if (["owner", "manager", "super_admin"].includes(req.user.role)) status = "approved";
       else if (req.user.role === "staff") status = "pending";
     }
@@ -740,7 +758,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (!fuel) throw bad("Pick a fuel type.");
       if (!(qty > 0)) throw bad("Enter the litres.");
       if (rate < 0 || discount < 0) throw bad("Rate and discount stay at zero or above.");
-      const amount = Math.max(0, Math.round((qty * rate - discount) * 100) / 100);
+      const amount = Math.max(0, round2(qty * rate - discount));
       return { fuel, qty, rate, discount, amount };
     });
     if (!lines.length) throw bad("Add a fuel line.");
@@ -806,7 +824,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const paymentMode = modes.includes(req.body?.paymentMode) ? req.body.paymentMode : "Cash";
     const billedAt = req.body?.billedAt ? new Date(req.body.billedAt) : new Date();
     if (Number.isNaN(billedAt.getTime())) throw bad("Pick a date and time.");
-    const total = Math.round(lines.reduce((sum, line) => sum + line.amount, 0) * 100) / 100;
+    const total = round2(lines.reduce((sum, line) => sum + line.amount, 0));
     const next = await nextBillNo(outlet);
     const billNo = next.label;
     let rows;
@@ -947,4 +965,6 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     );
     res.status(201).json({ id: rows[0].id });
   }));
+
+  registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, money, round2, payMode });
 }

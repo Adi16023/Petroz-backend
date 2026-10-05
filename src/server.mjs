@@ -99,6 +99,7 @@ function lineDto(row) {
     qty: num(row.qty),
     rate: num(row.rate),
     amount: num(row.amount),
+    testQty: num(row.test_qty),
     qtyReceived: num(row.qty_received),
   };
 }
@@ -153,6 +154,7 @@ function shiftDto(row) {
     unlockReason: row.unlock_reason,
     investigation: row.investigation,
     investigationNote: row.investigation_note,
+    entry: row.entry && typeof row.entry === "object" ? row.entry : {},
   };
 }
 
@@ -959,6 +961,7 @@ const saleSelect = `
            'qty', l.qty,
            'rate', l.rate,
            'amount', l.amount,
+           'test_qty', l.test_qty,
            'qty_received', NULL
          )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
   FROM sales s
