@@ -770,7 +770,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
        FROM billing WHERE outlet_id = $1`,
       [outlet.id],
     );
-    return `${outlet.code}-${String(rows[0].n).padStart(5, "0")}`;
+    const n = Math.max(rows[0].n, Number(outlet.next_bill_no) || 1);
+    return { n, label: `${outlet.code}-${String(n).padStart(5, "0")}` };
   }
 
   app.get("/api/billing", wrap(async (req, res) => {
@@ -783,9 +784,15 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       `SELECT company_image, banner_image FROM settings WHERE id = $1`,
       [outlet.settings_id],
     );
+    const next = await nextBillNo(outlet);
     res.json({
       stationName: outlet.name,
-      nextBillNo: await nextBillNo(outlet),
+      address: outlet.address || "",
+      phone: outlet.phone || "",
+      gstin: outlet.gstin || "",
+      ownerWhatsapp: outlet.owner_whatsapp || "",
+      nextBillNumber: next.n,
+      nextBillNo: next.label,
       companyImage: brand[0]?.company_image || null,
       bannerImage: brand[0]?.banner_image || null,
       bills: rows.map(billDto),
@@ -800,7 +807,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const billedAt = req.body?.billedAt ? new Date(req.body.billedAt) : new Date();
     if (Number.isNaN(billedAt.getTime())) throw bad("Pick a date and time.");
     const total = Math.round(lines.reduce((sum, line) => sum + line.amount, 0) * 100) / 100;
-    const billNo = await nextBillNo(outlet);
+    const next = await nextBillNo(outlet);
+    const billNo = next.label;
     let rows;
     try {
       ({ rows } = await pool.query(
@@ -829,22 +837,69 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (error.code === "23505") throw bad("That bill number was just used. Save again.");
       throw error;
     }
+    await pool.query(`UPDATE outlets SET next_bill_no = $2 WHERE id = $1`, [outlet.id, next.n + 1]);
     await log(req.user, outlet.id, "created", `Bill ${billNo}`, "billing", rows[0].id);
-    res.status(201).json({ bill: billDto(rows[0]), nextBillNo: await nextBillNo(outlet) });
+    const following = await nextBillNo({ ...outlet, next_bill_no: next.n + 1 });
+    res.status(201).json({ bill: billDto(rows[0]), nextBillNo: following.label });
   }));
 
   const FUEL_BRANDS = ["iocl", "bpcl", "hpcl", "nayara", "jio-bp", "shell", "reliance", "mrpl"];
 
   app.patch("/api/outlets/:id", wrap(async (req, res) => {
-    if (req.user.role !== "owner" && req.user.role !== "super_admin") {
+    const body = req.body ?? {};
+    const touchesBrand = Object.prototype.hasOwnProperty.call(body, "brand");
+    const stationKeys = ["name", "address", "phone", "gstin", "ownerWhatsapp", "nextBillNo"];
+    const touchesStation = stationKeys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
+    if (!touchesBrand && !touchesStation) throw bad("Nothing to save.");
+    if (touchesBrand && req.user.role !== "owner" && req.user.role !== "super_admin") {
       throw bad("The dealer sets the company.", 403);
     }
+    if (touchesStation && !["owner", "super_admin", "manager"].includes(req.user.role)) {
+      throw bad("The dealer saves the bill settings.", 403);
+    }
     const outlet = await assertOutlet(pool, req.user, req.params.id);
-    const brand = String(req.body?.brand ?? "").trim();
-    if (brand && !FUEL_BRANDS.includes(brand)) throw bad("Pick a company from the list.");
-    await pool.query(`UPDATE outlets SET brand = $2 WHERE id = $1`, [outlet.id, brand || null]);
-    await log(req.user, outlet.id, "updated", brand ? `Company set to ${brand}` : "Company cleared", "outlets", outlet.id);
-    res.json({ id: outlet.id, brand: brand || null });
+    let brand = null;
+    if (touchesBrand) {
+      brand = String(body.brand ?? "").trim();
+      if (brand && !FUEL_BRANDS.includes(brand)) throw bad("Pick a company from the list.");
+    }
+    const name = String(body.name ?? "").trim();
+    if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Station name is required.");
+    let nextNo = null;
+    if (Object.prototype.hasOwnProperty.call(body, "nextBillNo")) {
+      nextNo = Math.round(Number(body.nextBillNo));
+      if (!Number.isFinite(nextNo) || nextNo < 1) throw bad("Next bill number starts at 1.");
+    }
+    await pool.query(
+      `UPDATE outlets SET
+         brand = CASE WHEN $2 THEN $3 ELSE brand END,
+         name = CASE WHEN $4 THEN $5 ELSE name END,
+         address = CASE WHEN $6 THEN $7 ELSE address END,
+         phone = CASE WHEN $8 THEN $9 ELSE phone END,
+         gstin = CASE WHEN $10 THEN $11 ELSE gstin END,
+         owner_whatsapp = CASE WHEN $12 THEN $13 ELSE owner_whatsapp END,
+         next_bill_no = CASE WHEN $14 THEN $15 ELSE next_bill_no END
+       WHERE id = $1`,
+      [
+        outlet.id,
+        touchesBrand,
+        brand,
+        Object.prototype.hasOwnProperty.call(body, "name"),
+        name,
+        Object.prototype.hasOwnProperty.call(body, "address"),
+        String(body.address ?? "").trim() || null,
+        Object.prototype.hasOwnProperty.call(body, "phone"),
+        String(body.phone ?? "").trim() || null,
+        Object.prototype.hasOwnProperty.call(body, "gstin"),
+        String(body.gstin ?? "").trim() || null,
+        Object.prototype.hasOwnProperty.call(body, "ownerWhatsapp"),
+        String(body.ownerWhatsapp ?? "").trim() || null,
+        nextNo != null,
+        nextNo,
+      ],
+    );
+    await log(req.user, outlet.id, "updated", touchesStation ? "Bill settings saved" : (brand ? `Company set to ${brand}` : "Company cleared"), "outlets", outlet.id);
+    res.json({ id: outlet.id, brand: touchesBrand ? brand || null : outlet.brand ?? null });
   }));
 
   app.patch("/api/dealer", wrap(async (req, res) => {

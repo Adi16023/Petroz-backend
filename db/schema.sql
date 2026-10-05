@@ -138,11 +138,21 @@ CREATE TABLE IF NOT EXISTS outlets (
   name text NOT NULL,
   code text NOT NULL,
   brand text,
+  address text,
+  phone text,
+  gstin text,
+  owner_whatsapp text,
+  next_bill_no integer,
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (settings_id, code)
 );
 
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS brand text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS address text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS phone text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS gstin text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS owner_whatsapp text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS next_bill_no integer;
 
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

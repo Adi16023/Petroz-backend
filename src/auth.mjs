@@ -93,7 +93,7 @@ export async function assertOutlet(pool, user, outletId) {
     throw error;
   }
   const { rows } = await pool.query(
-    `SELECT id, settings_id, name, code FROM outlets WHERE id = $1`,
+    `SELECT id, settings_id, name, code, address, phone, gstin, owner_whatsapp, next_bill_no FROM outlets WHERE id = $1`,
     [outletId],
   );
   const outlet = rows[0];

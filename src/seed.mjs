@@ -20,7 +20,7 @@ export async function ensureSeed(pool) {
     );
     const settingsId = settings.rows[0].id;
     await client.query(
-      `INSERT INTO outlets (settings_id, name, code) VALUES ($1, 'Whitefield', 'WFD'), ($1, 'T. Nagar', 'TNG')`,
+      `INSERT INTO outlets (settings_id, name, code, brand) VALUES ($1, 'Whitefield', 'WFD', 'iocl'), ($1, 'T. Nagar', 'TNG', NULL)`,
       [settingsId],
     );
     await client.query(
