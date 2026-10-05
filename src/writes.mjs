@@ -253,6 +253,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           }
         }
       }
+      if (kind === "expense" && req.body?.shiftId && (mode === "cash" || req.body?.deductFromShiftCash) && status !== "rejected") {
+        await client.query(
+          `UPDATE shifts SET expected_cash = expected_cash - $2 WHERE id = $1`,
+          [req.body.shiftId, net],
+        );
+      }
       await client.query(
         `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
          VALUES ($1, $2, $3, $4, $5, $6)`,
@@ -496,6 +502,52 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     res.json({ id: row.id });
   }));
 
+  app.post("/api/shifts", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const label = String(req.body?.label ?? "").trim();
+    const startsAt = req.body?.startsAt;
+    const endsAt = req.body?.endsAt;
+    if (!label || !startsAt || !endsAt) throw bad("Name, start, and end are required.");
+    const startMs = Date.parse(startsAt);
+    const endMs = Date.parse(endsAt);
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs) || endMs <= startMs) {
+      throw bad("End must be after the start.");
+    }
+    const now = Date.now();
+    const status = now >= endMs ? "closed" : now >= startMs ? "open" : "upcoming";
+    const { rows } = await pool.query(
+      `INSERT INTO shifts (outlet_id, label, starts_at, ends_at, status)
+       VALUES ($1, $2, $3, $4, $5::shift_status)
+       RETURNING id`,
+      [outlet.id, label, new Date(startMs).toISOString(), new Date(endMs).toISOString(), status],
+    );
+    await log(req.user, outlet.id, "shift", `Opened ${label}`, "shifts", rows[0].id);
+    res.status(201).json({ id: rows[0].id });
+  }));
+
+  app.delete("/api/shifts/:id", wrap(async (req, res) => {
+    const found = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [req.params.id]);
+    const shift = found.rows[0];
+    if (!shift) throw bad("Shift not found.", 404);
+    await assertOutlet(pool, req.user, shift.outlet_id);
+    const used = await pool.query(
+      `SELECT
+         (SELECT count(*)::int FROM sales WHERE shift_id = $1) +
+         (SELECT count(*)::int FROM expenses WHERE shift_id = $1) +
+         (SELECT count(*)::int FROM dip_readings WHERE shift_id = $1) +
+         (SELECT count(*)::int FROM documents WHERE shift_id = $1) +
+         (SELECT count(*)::int FROM purchases WHERE shift_id = $1) +
+         (SELECT count(*)::int FROM banking WHERE shift_id = $1) AS n`,
+      [shift.id],
+    );
+    if (Number(used.rows[0].n) > 0) {
+      throw bad("This shift has sales, expenses, or readings, so it stays.");
+    }
+    await pool.query(`DELETE FROM shifts WHERE id = $1`, [shift.id]);
+    await log(req.user, shift.outlet_id, "shift", `Removed ${shift.label}`, "shifts", shift.id);
+    res.json({ id: shift.id });
+  }));
+
   app.patch("/api/shifts/:id", wrap(async (req, res) => {
     const found = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [req.params.id]);
     const shift = found.rows[0];
@@ -525,19 +577,29 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       );
     }
     const status = ["upcoming", "open", "closed"].includes(body.status) ? body.status : shift.status;
+    const label = String(body.label ?? "").trim() || shift.label;
+    const startsAt = body.startsAt ? new Date(body.startsAt).toISOString() : shift.starts_at;
+    const endsAt = body.endsAt ? new Date(body.endsAt).toISOString() : shift.ends_at;
+    if (Date.parse(endsAt) <= Date.parse(startsAt)) throw bad("End must be after the start.");
     await pool.query(
       `UPDATE shifts SET
-         status = $2::shift_status,
-         declared_cash = COALESCE($3, declared_cash),
-         closed_by = COALESCE($4, closed_by),
-         approved_by = COALESCE($5, approved_by),
-         unlock_reason = COALESCE($6, unlock_reason),
-         investigation = COALESCE($7::investigation_status, investigation),
-         investigation_note = COALESCE($8, investigation_note),
-         duties = $9::jsonb
+         label = $2,
+         starts_at = $3,
+         ends_at = $4,
+         status = $5::shift_status,
+         declared_cash = COALESCE($6, declared_cash),
+         closed_by = COALESCE($7, closed_by),
+         approved_by = COALESCE($8, approved_by),
+         unlock_reason = COALESCE($9, unlock_reason),
+         investigation = COALESCE($10::investigation_status, investigation),
+         investigation_note = COALESCE($11, investigation_note),
+         duties = $12::jsonb
        WHERE id = $1`,
       [
         shift.id,
+        label,
+        startsAt,
+        endsAt,
         status,
         body.declaredCash == null ? null : money(body.declaredCash),
         body.closedBy || null,
