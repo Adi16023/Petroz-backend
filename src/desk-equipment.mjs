@@ -59,13 +59,18 @@ async function upsertFuel(pool, settingsId, ref, name, fields) {
   return rows[0].id;
 }
 
-export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
+export async function syncDeskEquipment(pool, { settingsId, outletId, desk, scope }) {
   if (!settingsId || !outletId || !desk || typeof desk !== "object" || Array.isArray(desk)) return;
+  const parts = {
+    fuels: scope?.fuels !== false,
+    tanks: scope?.tanks !== false,
+    pumps: scope?.pumps !== false,
+  };
 
   const productByFuel = new Map();
   const keptProducts = [];
 
-  for (const fuel of list(desk.fuels)) {
+  if (parts.fuels) for (const fuel of list(desk.fuels)) {
     const name = String(fuel?.name ?? "").trim();
     const id = String(fuel?.id ?? "").trim();
     if (!name || !id || fuel.on === false) continue;
@@ -97,7 +102,7 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
 
   const tankByFuel = new Map();
   const keptTanks = [];
-  for (const tank of list(desk.tanks)) {
+  if (parts.tanks) for (const tank of list(desk.tanks)) {
     const name = String(tank?.name ?? "").trim();
     const id = String(tank?.id ?? "").trim();
     if (!name || !id || tank.on === false) continue;
@@ -122,14 +127,14 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
 
   const pumps = list(desk.pumps);
   const keptNozzles = [];
-  if (pumps.length) for (const pump of pumps) {
+  if (parts.pumps && pumps.length) for (const pump of pumps) {
     const pumpId = String(pump?.id ?? "").trim();
     if (!pumpId || pump.on === false) continue;
     const pumpName = String(pump?.name ?? "").trim() || "Pump";
     const slots = list(pump.nozzles);
     for (let index = 0; index < slots.length; index += 1) {
       const slot = slots[index];
-      if (!slot || slot.on === false) continue;
+      if (!slot) continue;
       const fuel = String(slot.fuel ?? "").trim();
       const key = fuelKey(fuel);
       if (!key || key === "not assigned") continue;
@@ -160,23 +165,24 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
         [outletId, label, ref, pumpName],
       );
       const { rows } = await pool.query(
-        `INSERT INTO equipment (outlet_id, parent_id, product_id, kind, label, meter, pump_name, settings_ref)
-         VALUES ($1, $2, $3, 'nozzle', $4, COALESCE($5::numeric, 0), $6, $7)
+        `INSERT INTO equipment (outlet_id, parent_id, product_id, kind, label, meter, pump_name, settings_ref, active)
+         VALUES ($1, $2, $3, 'nozzle', $4, COALESCE($5::numeric, 0), $6, $7, $8)
          ON CONFLICT (outlet_id, settings_ref) WHERE settings_ref IS NOT NULL AND settings_ref <> ''
          DO UPDATE SET
            parent_id = EXCLUDED.parent_id,
            product_id = EXCLUDED.product_id,
            label = EXCLUDED.label,
-           pump_name = EXCLUDED.pump_name
+           pump_name = EXCLUDED.pump_name,
+           active = EXCLUDED.active
          RETURNING id`,
-        [outletId, parentId, productId, label, meter, pumpName, ref],
+        [outletId, parentId, productId, label, meter, pumpName, ref, slot.on !== false],
       );
       if (meter != null) await appendPreviousClosing(pool, rows[0].id, meter);
       keptNozzles.push(rows[0].id);
     }
   }
 
-  if (pumps.length) await pool.query(
+  if (parts.pumps && pumps.length) await pool.query(
     `DELETE FROM equipment e
      WHERE e.outlet_id = $1
        AND e.kind = 'nozzle'
@@ -188,7 +194,7 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
        AND NOT EXISTS (SELECT 1 FROM document_items d WHERE d.equipment_id = e.id)`,
     [outletId, keptNozzles],
   );
-  await pool.query(
+  if (parts.tanks) await pool.query(
     `DELETE FROM equipment e
      WHERE e.outlet_id = $1
        AND e.kind = 'tank'
@@ -201,7 +207,7 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
        AND NOT EXISTS (SELECT 1 FROM document_items d WHERE d.equipment_id = e.id)`,
     [outletId, keptTanks],
   );
-  await pool.query(
+  if (parts.fuels) await pool.query(
     `DELETE FROM balances b
      USING products pr
      WHERE b.product_id = pr.id
@@ -215,7 +221,7 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
        AND NOT EXISTS (SELECT 1 FROM document_items d WHERE d.product_id = pr.id)`,
     [outletId, settingsId, keptProducts],
   );
-  await pool.query(
+  if (parts.fuels) await pool.query(
     `DELETE FROM products pr
      WHERE pr.settings_id = $1
        AND pr.settings_ref IS NOT NULL

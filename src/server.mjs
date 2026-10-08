@@ -270,16 +270,31 @@ app.get("/api/dealer", wrap(async (req, res) => {
     varianceAlert: num(dealer.variance_alert),
     auditorCanFileFindings: dealer.auditor_can_file_findings,
     schedules: dealer.schedules ?? [],
+    prefs: dealer.prefs && typeof dealer.prefs === "object" ? dealer.prefs : {},
     desk: deskWithOutlet(storedDesk, outlet, owner.rows[0]),
     companyImage: withImages ? dealer.company_image || null : null,
     bannerImage: withImages ? dealer.banner_image || null : null,
   });
 }));
 
+app.get("/api/pay-modes", wrap(async (_req, res) => {
+  const { rows } = await pool.query(
+    `SELECT e.enumlabel AS id
+     FROM pg_enum e
+     JOIN pg_type t ON t.oid = e.enumtypid
+     WHERE t.typname = 'pay_mode'
+     ORDER BY e.enumsortorder`,
+  );
+  res.json(rows.map((row) => ({ id: row.id, name: row.id })));
+}));
+
 app.get("/api/outlets", wrap(async (req, res) => {
   const ids = await outletIdsFor(pool, req.user);
   const { rows } = await pool.query(
-    `SELECT id, name, code, brand, address, phone, gstin FROM outlets WHERE id = ANY($1::uuid[]) ORDER BY name`,
+    `SELECT id, name, code, brand, address, phone, gstin, city, state, pincode,
+            business_type AS "businessType", opens_at AS "opensAt", closes_at AS "closesAt",
+            open_days AS "openDays", next_bill_no AS "nextBillNo", bill, messages
+     FROM outlets WHERE id = ANY($1::uuid[]) ORDER BY name`,
     [ids],
   );
   res.json(rows);
@@ -795,6 +810,8 @@ app.get("/api/equipment", wrap(async (req, res) => {
     meter: num(row.meter),
     pumpName: row.pump_name,
     settingsRef: row.settings_ref,
+    active: row.active !== false,
+    dipMethod: row.dip_method,
     tolerance: num(row.tolerance),
     dipChart: row.dip_chart ?? [],
   });
@@ -829,6 +846,7 @@ app.get("/api/products", wrap(async (req, res) => {
     gst: num(row.gst),
     purchasePrice: num(row.purchase_price),
     sellingPrice: num(row.selling_price),
+    active: row.active !== false,
     onHand: num(row.on_hand) ?? 0,
     minQty: num(row.min_qty) ?? 0,
   })));

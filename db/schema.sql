@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS settings (
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS company_image text;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS banner_image text;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS desk jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS prefs jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS outlets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -155,6 +156,15 @@ ALTER TABLE outlets ADD COLUMN IF NOT EXISTS gstin text;
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS owner_whatsapp text;
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS next_bill_no integer;
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS desk jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS city text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS state text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS pincode text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS business_type text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS opens_at text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS closes_at text;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS open_days jsonb NOT NULL DEFAULT '[false,false,false,false,false,false,false]'::jsonb;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS bill jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS messages jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 UPDATE outlets o
 SET desk = s.desk
@@ -513,8 +523,11 @@ CREATE INDEX IF NOT EXISTS users_settings_idx ON users (settings_id);
 CREATE INDEX IF NOT EXISTS users_role_idx ON users (role);
 CREATE INDEX IF NOT EXISTS users_outlet_idx ON users (outlet_id);
 ALTER TABLE products ADD COLUMN IF NOT EXISTS settings_ref text;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
 ALTER TABLE equipment ADD COLUMN IF NOT EXISTS settings_ref text;
 ALTER TABLE equipment ADD COLUMN IF NOT EXISTS pump_name text;
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS dip_method text;
 UPDATE equipment
 SET pump_name = regexp_replace(label, ' N[0-9]+$', '')
 WHERE kind = 'nozzle' AND (pump_name IS NULL OR pump_name = '');

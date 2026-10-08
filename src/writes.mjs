@@ -119,7 +119,6 @@ async function applyOutletFromDesk(pool, outlet, desk, bad) {
       [outlet.settings_id, dealerName, email],
     );
   }
-  await syncDeskEquipment(pool, { settingsId: outlet.settings_id, outletId: outlet.id, desk });
 }
 
 export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
@@ -494,6 +493,51 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (!["staff", "manager"].includes(row.role)) throw bad("Employee ID is for staff.");
       employeeCode = await takeEmployeeCode(row.settings_id, req.body.employeeCode, row.id);
     }
+    const body = req.body ?? {};
+    const touchesProfile = ["name", "phone", "email", "address", "active", "designation", "staffType"].some((key) =>
+      Object.prototype.hasOwnProperty.call(body, key),
+    );
+    if (touchesProfile) {
+      if (!["owner", "super_admin"].includes(req.user.role)) throw bad("You cannot edit staff.", 403);
+      const name = String(body.name ?? "").trim();
+      if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Name is required.");
+      let staffType = null;
+      if (Object.prototype.hasOwnProperty.call(body, "staffType")) {
+        staffType = String(body.staffType ?? "").trim();
+        if (staffType && !STAFF_TYPES.includes(staffType)) throw bad("Pick a staff type.");
+      }
+      await pool.query(
+        `UPDATE users SET
+           name = CASE WHEN $2 THEN $3 ELSE name END,
+           phone = CASE WHEN $4 THEN $5 ELSE phone END,
+           email = CASE WHEN $6 THEN $7 ELSE email END,
+           address = CASE WHEN $8 THEN $9 ELSE address END,
+           active = CASE WHEN $10 THEN $11 ELSE active END,
+           designation = CASE WHEN $12 THEN $13 ELSE designation END,
+           staff_type = CASE WHEN $14 THEN $15::staff_type ELSE staff_type END,
+           role = CASE WHEN $16 THEN $17::user_role ELSE role END
+         WHERE id = $1`,
+        [
+          row.id,
+          Object.prototype.hasOwnProperty.call(body, "name"),
+          name,
+          Object.prototype.hasOwnProperty.call(body, "phone"),
+          String(body.phone ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "email"),
+          String(body.email ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "address"),
+          String(body.address ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "active"),
+          body.active !== false,
+          Object.prototype.hasOwnProperty.call(body, "designation"),
+          String(body.designation ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "staffType"),
+          staffType || null,
+          body.role === "manager" || body.role === "staff",
+          body.role === "manager" ? "manager" : "staff",
+        ],
+      );
+    }
     await pool.query(
       `UPDATE users SET
          permission_grants = COALESCE($2::text[], permission_grants),
@@ -553,10 +597,152 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       [req.params.id, req.user.settings_id],
     );
     if (!product.rows[0]) throw bad("Product not found.", 404);
+    const used = await pool.query(
+      `SELECT 1 FROM equipment WHERE product_id = $1
+       UNION ALL SELECT 1 FROM sale_items WHERE product_id = $1
+       UNION ALL SELECT 1 FROM purchase_items WHERE product_id = $1
+       UNION ALL SELECT 1 FROM document_items WHERE product_id = $1
+       LIMIT 1`,
+      [req.params.id],
+    );
+    if (used.rows.length) throw bad("This product is already used. Turn it off instead of removing it.");
     await pool.query(`DELETE FROM balances WHERE product_id = $1 AND outlet_id = $2`, [req.params.id, outlet.id]);
     await pool.query(`DELETE FROM products WHERE id = $1 AND settings_id = $2`, [req.params.id, req.user.settings_id]);
     await log(req.user, outlet.id, "deleted", req.body?.reason || "Product removed", "products", req.params.id);
     res.json({ id: req.params.id, deleted: true });
+  }));
+
+  app.patch("/api/products/:id", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const product = await pool.query(
+      `SELECT id FROM products WHERE id = $1 AND settings_id = $2`,
+      [req.params.id, outlet.settings_id],
+    );
+    if (!product.rows[0]) throw bad("Product not found.", 404);
+    const body = req.body ?? {};
+    const name = String(body.name ?? "").trim();
+    if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Product name is required.");
+    await pool.query(
+      `UPDATE products SET
+         name = CASE WHEN $2 THEN $3 ELSE name END,
+         unit = CASE WHEN $4 THEN $5 ELSE unit END,
+         gst = CASE WHEN $6 THEN $7 ELSE gst END,
+         purchase_price = CASE WHEN $8 THEN $9 ELSE purchase_price END,
+         selling_price = CASE WHEN $10 THEN $11 ELSE selling_price END,
+         active = CASE WHEN $12 THEN $13 ELSE active END
+       WHERE id = $1`,
+      [
+        req.params.id,
+        Object.prototype.hasOwnProperty.call(body, "name"),
+        name,
+        Object.prototype.hasOwnProperty.call(body, "unit"),
+        String(body.unit ?? "").trim() || null,
+        Object.prototype.hasOwnProperty.call(body, "gst"),
+        money(body.gst),
+        Object.prototype.hasOwnProperty.call(body, "purchasePrice"),
+        money(body.purchasePrice),
+        Object.prototype.hasOwnProperty.call(body, "sellingPrice"),
+        money(body.sellingPrice),
+        Object.prototype.hasOwnProperty.call(body, "active"),
+        body.active !== false,
+      ],
+    );
+    await log(req.user, outlet.id, "updated", name || "Product updated", "products", req.params.id);
+    res.json({ id: req.params.id });
+  }));
+
+  async function fuelProduct(settingsId, name) {
+    const label = String(name ?? "").trim();
+    if (!label || label.toLowerCase() === "not assigned") return null;
+    const found = await pool.query(
+      `SELECT id FROM products WHERE settings_id = $1 AND kind = 'fuel' AND lower(name) = lower($2) ORDER BY created_at LIMIT 1`,
+      [settingsId, label],
+    );
+    if (found.rows[0]) return found.rows[0].id;
+    const created = await pool.query(
+      `INSERT INTO products (settings_id, kind, name, unit, gst, purchase_price, selling_price)
+       VALUES ($1, 'fuel', $2, $3, 0, 0, 0)
+       RETURNING id`,
+      [settingsId, label, label.toLowerCase() === "cng" ? "Kg" : "Litre"],
+    );
+    return created.rows[0].id;
+  }
+
+  function stockKl(fuel, litres) {
+    const amount = money(litres);
+    const key = String(fuel ?? "").trim().toLowerCase();
+    if (["petrol", "diesel", "power", "ms", "hsd"].includes(key)) return amount / 1000;
+    return amount;
+  }
+
+  app.post("/api/equipment", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const kind = req.body?.kind === "nozzle" ? "nozzle" : req.body?.kind === "tank" ? "tank" : "";
+    if (!kind) throw bad("Unknown equipment kind.");
+    const label = String(req.body?.label ?? "").trim();
+    if (!label) throw bad("Name is required.");
+    const fuel = String(req.body?.productName ?? "").trim();
+    const productId = await fuelProduct(outlet.settings_id, fuel);
+    let parentId = null;
+    if (kind === "nozzle") {
+      parentId = req.body?.parentId || null;
+      if (!parentId && productId) {
+        const tank = await pool.query(
+          `SELECT id FROM equipment WHERE outlet_id = $1 AND kind = 'tank' AND product_id = $2 ORDER BY label LIMIT 1`,
+          [outlet.id, productId],
+        );
+        parentId = tank.rows[0]?.id ?? null;
+      }
+      if (!parentId) {
+        const created = await pool.query(
+          `INSERT INTO equipment (outlet_id, product_id, kind, label, capacity, live_qty)
+           VALUES ($1, $2, 'tank', $3, 0, 0)
+           RETURNING id`,
+          [outlet.id, productId, fuel || label],
+        );
+        parentId = created.rows[0].id;
+      }
+    }
+    const { rows } = await pool.query(
+      `INSERT INTO equipment (outlet_id, parent_id, product_id, kind, label, capacity, live_qty, meter, pump_name, active, dip_method)
+       VALUES ($1, $2, $3, $4::equipment_kind, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id`,
+      [
+        outlet.id,
+        parentId,
+        productId,
+        kind,
+        label,
+        kind === "tank" ? stockKl(fuel, req.body?.capacityLitres) : null,
+        kind === "tank" ? stockKl(fuel, req.body?.liveLitres) : 0,
+        req.body?.meter == null || req.body?.meter === "" ? 0 : money(req.body.meter),
+        req.body?.pumpName || null,
+        req.body?.active !== false,
+        req.body?.dipMethod || null,
+      ],
+    );
+    await log(req.user, outlet.id, "created", label, "equipment", rows[0].id);
+    res.status(201).json({ id: rows[0].id });
+  }));
+
+  app.delete("/api/equipment/:id", wrap(async (req, res) => {
+    const found = await pool.query(`SELECT id, outlet_id, label FROM equipment WHERE id = $1`, [req.params.id]);
+    const row = found.rows[0];
+    if (!row) throw bad("Equipment not found.", 404);
+    await assertOutlet(pool, req.user, row.outlet_id);
+    const used = await pool.query(
+      `SELECT 1 FROM dip_readings WHERE equipment_id = $1
+       UNION ALL SELECT 1 FROM sale_items WHERE equipment_id = $1
+       UNION ALL SELECT 1 FROM purchase_items WHERE equipment_id = $1
+       UNION ALL SELECT 1 FROM document_items WHERE equipment_id = $1
+       UNION ALL SELECT 1 FROM equipment WHERE parent_id = $1
+       LIMIT 1`,
+      [row.id],
+    );
+    if (used.rows.length) throw bad("This is already used on the desk. Turn it off instead of removing it.");
+    await pool.query(`DELETE FROM equipment WHERE id = $1`, [row.id]);
+    await log(req.user, row.outlet_id, "deleted", row.label, "equipment", row.id);
+    res.json({ id: row.id, deleted: true });
   }));
 
   app.post("/api/readings", wrap(async (req, res) => {
@@ -612,6 +798,62 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const row = found.rows[0];
     if (!row) throw bad("Equipment not found.", 404);
     await assertOutlet(pool, req.user, row.outlet_id);
+    const body = req.body ?? {};
+    const profile = ["label", "productName", "capacityLitres", "liveLitres", "meter", "pumpName", "active", "dipMethod"].some((key) =>
+      Object.prototype.hasOwnProperty.call(body, key),
+    );
+    if (profile) {
+      const current = await pool.query(
+        `SELECT e.product_id, pr.name AS product_name
+         FROM equipment e
+         LEFT JOIN products pr ON pr.id = e.product_id
+         WHERE e.id = $1`,
+        [row.id],
+      );
+      const fuel = Object.prototype.hasOwnProperty.call(body, "productName")
+        ? String(body.productName ?? "").trim()
+        : current.rows[0]?.product_name ?? "";
+      const home = await pool.query(`SELECT settings_id FROM outlets WHERE id = $1`, [row.outlet_id]);
+      const productId = Object.prototype.hasOwnProperty.call(body, "productName")
+        ? await fuelProduct(home.rows[0]?.settings_id, fuel)
+        : current.rows[0]?.product_id ?? null;
+      await pool.query(
+        `UPDATE equipment SET
+           label = CASE WHEN $2 THEN $3 ELSE label END,
+           product_id = CASE WHEN $4 THEN $5 ELSE product_id END,
+           capacity = CASE WHEN $6 THEN $7 ELSE capacity END,
+           live_qty = CASE WHEN $8 THEN $9 ELSE live_qty END,
+           meter = CASE WHEN $10 THEN $11 ELSE meter END,
+           pump_name = CASE WHEN $12 THEN $13 ELSE pump_name END,
+           active = CASE WHEN $14 THEN $15 ELSE active END,
+           dip_method = CASE WHEN $16 THEN $17 ELSE dip_method END
+         WHERE id = $1`,
+        [
+          row.id,
+          Object.prototype.hasOwnProperty.call(body, "label"),
+          String(body.label ?? "").trim(),
+          Object.prototype.hasOwnProperty.call(body, "productName"),
+          productId,
+          Object.prototype.hasOwnProperty.call(body, "capacityLitres"),
+          stockKl(fuel, body.capacityLitres),
+          Object.prototype.hasOwnProperty.call(body, "liveLitres"),
+          stockKl(fuel, body.liveLitres),
+          Object.prototype.hasOwnProperty.call(body, "meter"),
+          money(body.meter),
+          Object.prototype.hasOwnProperty.call(body, "pumpName"),
+          String(body.pumpName ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "active"),
+          body.active !== false,
+          Object.prototype.hasOwnProperty.call(body, "dipMethod"),
+          String(body.dipMethod ?? "").trim() || null,
+        ],
+      );
+      if (!Object.prototype.hasOwnProperty.call(body, "mm")) {
+        await log(req.user, row.outlet_id, "updated", String(body.label ?? "").trim() || "Equipment updated", "equipment", row.id);
+        res.json({ id: row.id });
+        return;
+      }
+    }
     const mm = money(req.body?.mm);
     const litres = money(req.body?.litres);
     const chart = Array.isArray(row.dip_chart) ? row.dip_chart.filter((point) => Number(point.mm) !== mm) : [];
@@ -880,6 +1122,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       ownerWhatsapp: outlet.owner_whatsapp || "",
       nextBillNumber: next.n,
       nextBillNo: next.label,
+      bill: outlet.bill && typeof outlet.bill === "object" ? outlet.bill : {},
       companyImage: brand[0]?.company_image || null,
       bannerImage: brand[0]?.banner_image || null,
       bills: rows.map(billDto),
@@ -971,8 +1214,10 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const body = req.body ?? {};
     const touchesBrand = Object.prototype.hasOwnProperty.call(body, "brand");
     const stationKeys = ["name", "code", "address", "phone", "gstin", "ownerWhatsapp", "nextBillNo"];
+    const profileKeys = ["city", "state", "pincode", "businessType", "opensAt", "closesAt", "openDays", "bill", "messages", "dealerName", "email"];
     const touchesStation = stationKeys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
-    if (!touchesBrand && !touchesStation) throw bad("Nothing to save.");
+    const touchesProfile = profileKeys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
+    if (!touchesBrand && !touchesStation && !touchesProfile) throw bad("Nothing to save.");
     if (touchesBrand && req.user.role !== "owner" && req.user.role !== "super_admin") {
       throw bad("The dealer sets the company.", 403);
     }
@@ -1032,8 +1277,74 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         nextNo,
       ],
     );
-    await log(req.user, outlet.id, "updated", touchesStation ? "Bill settings saved" : (brand ? `Company set to ${brand}` : "Company cleared"), "outlets", outlet.id);
+    if (touchesProfile) {
+      const days = Array.isArray(body.openDays) ? body.openDays.slice(0, 7).map((day) => day === true) : [];
+      while (days.length < 7) days.push(false);
+      const bill = body.bill && typeof body.bill === "object" && !Array.isArray(body.bill) ? body.bill : {};
+      const messages = body.messages && typeof body.messages === "object" && !Array.isArray(body.messages) ? body.messages : {};
+      await pool.query(
+        `UPDATE outlets SET
+           city = CASE WHEN $2 THEN $3 ELSE city END,
+           state = CASE WHEN $4 THEN $5 ELSE state END,
+           pincode = CASE WHEN $6 THEN $7 ELSE pincode END,
+           business_type = CASE WHEN $8 THEN $9 ELSE business_type END,
+           opens_at = CASE WHEN $10 THEN $11 ELSE opens_at END,
+           closes_at = CASE WHEN $12 THEN $13 ELSE closes_at END,
+           open_days = CASE WHEN $14 THEN $15::jsonb ELSE open_days END,
+           bill = CASE WHEN $16 THEN $17::jsonb ELSE bill END,
+           messages = CASE WHEN $18 THEN $19::jsonb ELSE messages END
+         WHERE id = $1`,
+        [
+          outlet.id,
+          Object.prototype.hasOwnProperty.call(body, "city"),
+          String(body.city ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "state"),
+          String(body.state ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "pincode"),
+          String(body.pincode ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "businessType"),
+          String(body.businessType ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "opensAt"),
+          String(body.opensAt ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "closesAt"),
+          String(body.closesAt ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "openDays"),
+          JSON.stringify(days),
+          Object.prototype.hasOwnProperty.call(body, "bill"),
+          JSON.stringify(bill),
+          Object.prototype.hasOwnProperty.call(body, "messages"),
+          JSON.stringify(messages),
+        ],
+      );
+      const dealerName = String(body.dealerName ?? "").trim();
+      const email = String(body.email ?? "").trim();
+      if (Object.prototype.hasOwnProperty.call(body, "dealerName") || Object.prototype.hasOwnProperty.call(body, "email")) {
+        await pool.query(
+          `UPDATE users SET
+             name = CASE WHEN $2 <> '' THEN $2 ELSE name END,
+             email = CASE WHEN $3 <> '' THEN $3 ELSE email END
+           WHERE settings_id = $1 AND role = 'owner'`,
+          [outlet.settings_id, dealerName, email],
+        );
+      }
+    }
+    await log(req.user, outlet.id, "updated", touchesStation || touchesProfile ? "Outlet saved" : (brand ? `Company set to ${brand}` : "Company cleared"), "outlets", outlet.id);
     res.json({ id: outlet.id, brand: touchesBrand ? brand || null : outlet.brand ?? null });
+  }));
+
+  app.put("/api/outlets/:id/nozzles", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.params.id);
+    if (!["owner", "super_admin"].includes(req.user.role)) throw bad("The dealer saves pumps.", 403);
+    const pumps = Array.isArray(req.body?.pumps) ? req.body.pumps : null;
+    if (!pumps) throw bad("Pumps are required.");
+    await syncDeskEquipment(pool, {
+      settingsId: outlet.settings_id,
+      outletId: outlet.id,
+      desk: { pumps },
+      scope: { fuels: false, tanks: false, pumps: true },
+    });
+    await log(req.user, outlet.id, "updated", "Pumps saved", "equipment", outlet.id);
+    res.json({ ok: true });
   }));
 
   app.patch("/api/dealer", wrap(async (req, res) => {
@@ -1064,6 +1375,11 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         [req.user.settings_id, JSON.stringify([{ name: req.body.schedule.name, cadence: req.body.schedule.cadence || "" }])],
       );
     }
+    if (req.body?.prefs && typeof req.body.prefs === "object" && !Array.isArray(req.body.prefs)) {
+      if (req.user.role !== "owner" && req.user.role !== "super_admin") throw bad("The dealer saves settings.", 403);
+      if (!req.user.settings_id) throw bad("Pick a dealer first.");
+      await pool.query(`UPDATE settings SET prefs = $2::jsonb WHERE id = $1`, [req.user.settings_id, JSON.stringify(req.body.prefs)]);
+    }
     if (req.body != null && Object.prototype.hasOwnProperty.call(req.body, "desk")) {
       if (req.user.role !== "owner" && req.user.role !== "super_admin") {
         throw bad("The dealer saves settings.", 403);
@@ -1078,7 +1394,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       const desk = req.body.desk;
       if (!desk || typeof desk !== "object" || Array.isArray(desk)) throw bad("Settings must be an object.");
       const storedDesk = { ...desk };
-      delete storedDesk.pumps;
+      for (const key of ["basic", "fuels", "pumps", "tanks", "staff", "payments", "shifts", "invoice", "messages", "preferences"]) {
+        delete storedDesk[key];
+      }
       const encoded = JSON.stringify(storedDesk);
       if (encoded.length > 500000) throw bad("Settings are too large.");
       if (!outlet) {

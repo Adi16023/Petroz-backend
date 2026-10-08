@@ -112,7 +112,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         `SELECT e.id, e.label, e.meter, e.product_id, pr.name AS product_name, pr.unit, pr.selling_price
          FROM equipment e
          LEFT JOIN products pr ON pr.id = e.product_id
-         WHERE e.outlet_id = $1 AND e.kind = 'nozzle'
+         WHERE e.outlet_id = $1 AND e.kind = 'nozzle' AND e.active = true
          ORDER BY e.label`,
         [outletId],
       ),
