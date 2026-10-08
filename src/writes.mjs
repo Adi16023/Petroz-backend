@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
 
 const PAY_MODES = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
@@ -118,6 +119,7 @@ async function applyOutletFromDesk(pool, outlet, desk, bad) {
       [outlet.settings_id, dealerName, email],
     );
   }
+  await syncDeskEquipment(pool, { settingsId: outlet.settings_id, outletId: outlet.id, desk });
 }
 
 export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {

@@ -512,6 +512,17 @@ CREATE INDEX IF NOT EXISTS outlets_settings_idx ON outlets (settings_id);
 CREATE INDEX IF NOT EXISTS users_settings_idx ON users (settings_id);
 CREATE INDEX IF NOT EXISTS users_role_idx ON users (role);
 CREATE INDEX IF NOT EXISTS users_outlet_idx ON users (outlet_id);
+ALTER TABLE products ADD COLUMN IF NOT EXISTS settings_ref text;
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS settings_ref text;
+
+CREATE UNIQUE INDEX IF NOT EXISTS products_settings_ref_uidx
+  ON products (settings_id, settings_ref)
+  WHERE settings_ref IS NOT NULL AND settings_ref <> '';
+
+CREATE UNIQUE INDEX IF NOT EXISTS equipment_settings_ref_uidx
+  ON equipment (outlet_id, settings_ref)
+  WHERE settings_ref IS NOT NULL AND settings_ref <> '';
+
 CREATE INDEX IF NOT EXISTS products_settings_idx ON products (settings_id);
 CREATE INDEX IF NOT EXISTS equipment_outlet_idx ON equipment (outlet_id);
 CREATE INDEX IF NOT EXISTS equipment_parent_idx ON equipment (parent_id);

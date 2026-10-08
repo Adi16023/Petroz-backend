@@ -1,3 +1,5 @@
+import { syncDeskEquipment } from "./desk-equipment.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function num(value) {
@@ -106,6 +108,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
 
   async function bundle(shift, settingsId) {
     const outletId = shift.outlet_id;
+    const stored = await pool.query(`SELECT desk FROM outlets WHERE id = $1`, [outletId]);
+    await syncDeskEquipment(pool, { settingsId, outletId, desk: stored.rows[0]?.desk });
     const duties = Array.isArray(shift.duties) ? shift.duties : [];
     const [nozzles, readings, previous, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent] = await Promise.all([
       pool.query(
