@@ -128,9 +128,14 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       pool.query(
         `SELECT DISTINCT ON (equipment_id) equipment_id, qty
          FROM dip_readings
-         WHERE kind = 'closing' AND at < $2 AND equipment_id IN (
-           SELECT id FROM equipment WHERE outlet_id = $1 AND kind = 'nozzle'
-         )
+         WHERE kind = 'closing'
+           AND equipment_id IN (
+             SELECT id FROM equipment WHERE outlet_id = $1 AND kind = 'nozzle'
+           )
+           AND (
+             (at < $2 AND COALESCE(remarks, '') <> 'previous closing')
+             OR remarks = 'previous closing'
+           )
          ORDER BY equipment_id, at DESC`,
         [outletId, shift.starts_at],
       ),
@@ -408,15 +413,22 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (!nozzle) continue;
         const opening = money(row.opening);
         if (row.previous != null && row.previous !== "") {
-          await client.query(
-            `UPDATE equipment SET meter = $2
-             WHERE id = $1
-               AND NOT EXISTS (
-                 SELECT 1 FROM dip_readings r
-                 WHERE r.equipment_id = $1 AND r.kind = 'closing' AND r.shift_id IS DISTINCT FROM $3
-               )`,
-            [nozzle.id, money(row.previous), shift.id],
+          const value = money(row.previous);
+          const stamped = await client.query(
+            `SELECT qty FROM dip_readings
+             WHERE equipment_id = $1 AND kind = 'closing' AND remarks = 'previous closing'
+             ORDER BY at DESC
+             LIMIT 1`,
+            [nozzle.id],
           );
+          const applied = stamped.rows[0] ? Number(stamped.rows[0].qty) : null;
+          if (applied == null || Math.round(applied * 1000) !== Math.round(value * 1000)) {
+            await client.query(
+              `INSERT INTO dip_readings (equipment_id, user_id, kind, qty, remarks)
+               VALUES ($1, $2, 'closing', $3, 'previous closing')`,
+              [nozzle.id, req.user.id, value],
+            );
+          }
         }
         const sold = Math.max(0, money(row.qty));
         const test = Math.min(sold, Math.max(0, money(row.test)));

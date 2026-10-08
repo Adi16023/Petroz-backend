@@ -19,6 +19,28 @@ function stockKl(fuel, value) {
   return amount;
 }
 
+function sameQty(left, right) {
+  return Math.round(Number(left) * 1000) === Math.round(Number(right) * 1000);
+}
+
+async function appendPreviousClosing(pool, equipmentId, meter) {
+  const latest = await pool.query(
+    `SELECT qty FROM dip_readings
+     WHERE equipment_id = $1 AND kind = 'closing' AND remarks = 'previous closing'
+     ORDER BY at DESC
+     LIMIT 1`,
+    [equipmentId],
+  );
+  const applied = latest.rows[0] ? Number(latest.rows[0].qty) : null;
+  if (applied != null && sameQty(applied, meter)) return;
+  await pool.query(
+    `INSERT INTO dip_readings (equipment_id, kind, qty, remarks)
+     VALUES ($1, 'closing', $2, 'previous closing')`,
+    [equipmentId, meter],
+  );
+  await pool.query(`UPDATE equipment SET meter = $2 WHERE id = $1`, [equipmentId, meter]);
+}
+
 async function upsertFuel(pool, settingsId, ref, name, fields) {
   const { rows } = await pool.query(
     `INSERT INTO products (settings_id, kind, name, unit, gst, purchase_price, selling_price, settings_ref)
@@ -134,15 +156,11 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
          DO UPDATE SET
            parent_id = EXCLUDED.parent_id,
            product_id = EXCLUDED.product_id,
-           label = EXCLUDED.label,
-           meter = CASE
-             WHEN EXISTS (SELECT 1 FROM dip_readings r WHERE r.equipment_id = equipment.id) THEN equipment.meter
-             WHEN $5::numeric IS NULL THEN equipment.meter
-             ELSE $5
-           END
+           label = EXCLUDED.label
          RETURNING id`,
         [outletId, parentId, productId, `${pumpName} N${index + 1}`, meter, `nozzle:${pumpId}:${index}`],
       );
+      if (meter != null) await appendPreviousClosing(pool, rows[0].id, meter);
       keptNozzles.push(rows[0].id);
     }
   }

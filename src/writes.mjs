@@ -708,22 +708,36 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const shift = found.rows[0];
     if (!shift) throw bad("Shift not found.", 404);
     await assertOutlet(pool, req.user, shift.outlet_id);
-    const used = await pool.query(
-      `SELECT
-         (SELECT count(*)::int FROM sales WHERE shift_id = $1) +
-         (SELECT count(*)::int FROM expenses WHERE shift_id = $1) +
-         (SELECT count(*)::int FROM dip_readings WHERE shift_id = $1) +
-         (SELECT count(*)::int FROM documents WHERE shift_id = $1) +
-         (SELECT count(*)::int FROM purchases WHERE shift_id = $1) +
-         (SELECT count(*)::int FROM banking WHERE shift_id = $1) AS n`,
-      [shift.id],
-    );
-    if (Number(used.rows[0].n) > 0) {
-      throw bad("This shift has sales, expenses, or readings, so it stays.");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(`DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE shift_id = $1)`, [shift.id]);
+      await client.query(`DELETE FROM sales WHERE shift_id = $1`, [shift.id]);
+      await client.query(`DELETE FROM purchase_items WHERE purchase_id IN (SELECT id FROM purchases WHERE shift_id = $1)`, [shift.id]);
+      await client.query(`DELETE FROM purchases WHERE shift_id = $1`, [shift.id]);
+      await client.query(`DELETE FROM document_items WHERE document_id IN (SELECT id FROM documents WHERE shift_id = $1)`, [shift.id]);
+      await client.query(
+        `UPDATE documents SET parent_id = NULL WHERE parent_id IN (SELECT id FROM documents WHERE shift_id = $1)`,
+        [shift.id],
+      );
+      await client.query(`DELETE FROM documents WHERE shift_id = $1`, [shift.id]);
+      await client.query(`DELETE FROM expenses WHERE shift_id = $1`, [shift.id]);
+      await client.query(`DELETE FROM banking WHERE shift_id = $1`, [shift.id]);
+      await client.query(`DELETE FROM dip_readings WHERE shift_id = $1`, [shift.id]);
+      await client.query(`DELETE FROM shifts WHERE id = $1`, [shift.id]);
+      await client.query(
+        `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+         VALUES ($1, $2, 'deleted', $3, 'shifts', $4)`,
+        [shift.outlet_id, req.user.id, `Removed ${shift.label} and its records`, shift.id],
+      );
+      await client.query("COMMIT");
+      res.json({ id: shift.id });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
-    await pool.query(`DELETE FROM shifts WHERE id = $1`, [shift.id]);
-    await log(req.user, shift.outlet_id, "shift", `Removed ${shift.label}`, "shifts", shift.id);
-    res.json({ id: shift.id });
   }));
 
   app.patch("/api/shifts/:id", wrap(async (req, res) => {
