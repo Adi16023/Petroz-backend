@@ -386,6 +386,110 @@ app.post("/api/dealers", wrap(async (req, res) => {
   }
 }));
 
+const DIRECTORY_ROLES = ["owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor", "supplier", "bank", "provider"];
+const DIRECTORY_STAFF = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
+const DIRECTORY_STAFF_LABEL = {
+  cashier: "Cashier",
+  pump_boy: "Pump operator",
+  supervisor: "Supervisor",
+  air_boy: "Air boy",
+  dsm: "Dealer salesman",
+  custom: "Staff",
+};
+
+app.post("/api/admin/users", wrap(async (req, res) => {
+  requireSuper(req.user);
+  const name = String(req.body?.name ?? "").trim();
+  const phone = String(req.body?.phone ?? "").trim();
+  const email = String(req.body?.email ?? "").trim();
+  const password = String(req.body?.password ?? "");
+  const role = String(req.body?.role ?? "");
+  const digits = phone.replace(/\D/g, "");
+  if (!name) throw bad("Name is required.");
+  if (!digits) throw bad("Mobile is required.");
+  if (password.length < 4) throw bad("Password must be at least 4 characters.");
+  if (!DIRECTORY_ROLES.includes(role)) throw bad("Pick a role.");
+  let staffType = null;
+  let designation = "Staff";
+  if (role === "staff") {
+    staffType = String(req.body?.staffType ?? "");
+    if (!DIRECTORY_STAFF.includes(staffType)) throw bad("Pick a staff type.");
+    designation = DIRECTORY_STAFF_LABEL[staffType];
+  } else if (role === "manager") designation = "Manager";
+  else if (role === "owner") designation = "Dealer";
+  else if (role === "credit_customer") designation = "Credit customer";
+  else if (role === "accounts_auditor") designation = "Accounts auditor";
+  else designation = role.slice(0, 1).toUpperCase() + role.slice(1);
+  const taken = await pool.query(
+    `SELECT id FROM users
+     WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+       AND active = true
+       AND role = ANY($2::user_role[])`,
+    [digits, ["super_admin", ...DIRECTORY_ROLES]],
+  );
+  if (taken.rows.length) throw bad("That mobile is already in use.");
+  const hash = await bcrypt.hash(password, 10);
+  const requestedOutlet = String(req.body?.outletId ?? "").trim();
+  const outletBody = req.body?.outlet && typeof req.body.outlet === "object" ? req.body.outlet : {};
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let settingsId;
+    let linkedOutletId;
+    if (requestedOutlet) {
+      const found = await client.query(`SELECT id, settings_id FROM outlets WHERE id = $1`, [requestedOutlet]);
+      if (!found.rows[0]) throw bad("Outlet not found.");
+      settingsId = found.rows[0].settings_id;
+      linkedOutletId = found.rows[0].id;
+    } else {
+      const outletName = String(outletBody.name ?? "").trim();
+      if (!outletName) throw bad("Outlet name is required.");
+      const rawCode = String(outletBody.code ?? "").trim().toUpperCase();
+      const code = (rawCode || outletName.replace(/[^a-z]/gi, "").toUpperCase().slice(0, 4) || "OUT").slice(0, 12);
+      const settings = await client.query(
+        `INSERT INTO settings (auto_approve_below, variance_alert) VALUES (500, 200) RETURNING id`,
+      );
+      settingsId = settings.rows[0].id;
+      const created = await client.query(
+        `INSERT INTO outlets (settings_id, name, code, address, phone, gstin, city)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
+         RETURNING id`,
+        [
+          settingsId,
+          outletName,
+          code,
+          String(outletBody.address ?? "").trim() || null,
+          String(outletBody.phone ?? "").trim() || null,
+          String(outletBody.gstin ?? "").trim() || null,
+          String(outletBody.city ?? "").trim() || null,
+        ],
+      );
+      linkedOutletId = created.rows[0].id;
+    }
+    const userOutletId = role === "owner" ? null : linkedOutletId;
+    const user = await client.query(
+      `INSERT INTO users (
+         settings_id, outlet_id, role, staff_type, name, phone, email, password_hash, designation, active
+       ) VALUES ($1, $2, $3::user_role, $4::staff_type, $5, $6, $7, $8, $9, true)
+       RETURNING id`,
+      [settingsId, userOutletId, role, staffType, name, phone, email || null, hash, designation],
+    );
+    await client.query(
+      `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+       VALUES ($1, $2, 'created', $3, 'users', $4)`,
+      [linkedOutletId, req.user.id, `${designation} ${name}`, user.rows[0].id],
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ id: user.rows[0].id, outletId: linkedOutletId });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "23505") throw bad("That outlet code is already used.");
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.get("/api/notifications", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const dealer = await pool.query(`SELECT variance_alert FROM settings WHERE id = $1`, [outlet.settings_id]);
