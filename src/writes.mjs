@@ -67,6 +67,59 @@ function optionalDay(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : null;
 }
 
+function deskText(value) {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function deskAddress(basic) {
+  const line = deskText(basic?.address);
+  const place = [deskText(basic?.city), deskText(basic?.state)].filter(Boolean).join(", ");
+  const tail = [place, deskText(basic?.pincode)].filter(Boolean).join(" - ");
+  if (!tail) return line;
+  if (!line) return tail;
+  return `${line}, ${tail}`;
+}
+
+async function applyOutletFromDesk(pool, outlet, desk, bad) {
+  const basic = desk?.basic && typeof desk.basic === "object" ? desk.basic : {};
+  const invoice = desk?.invoice && typeof desk.invoice === "object" ? desk.invoice : {};
+  const name = deskText(basic.outletName);
+  const code = deskText(basic.code);
+  const phone = deskText(basic.phone) || deskText(invoice.phone);
+  const address = deskAddress(basic) || deskText(invoice.address);
+  const gstin = deskText(invoice.gstin);
+  if (code && code !== outlet.code) {
+    const taken = await pool.query(
+      `SELECT id FROM outlets WHERE settings_id = $1 AND code = $2 AND id <> $3 LIMIT 1`,
+      [outlet.settings_id, code, outlet.id],
+    );
+    if (taken.rows.length) throw bad("That outlet code is already used.");
+  }
+  if (name || code || phone || address || gstin) {
+    await pool.query(
+      `UPDATE outlets SET
+         name = CASE WHEN $2 <> '' THEN $2 ELSE name END,
+         code = CASE WHEN $3 <> '' THEN $3 ELSE code END,
+         phone = CASE WHEN $4 <> '' THEN $4 ELSE phone END,
+         address = CASE WHEN $5 <> '' THEN $5 ELSE address END,
+         gstin = CASE WHEN $6 <> '' THEN $6 ELSE gstin END
+       WHERE id = $1`,
+      [outlet.id, name, code, phone, address, gstin],
+    );
+  }
+  const dealerName = deskText(basic.dealerName);
+  const email = deskText(basic.email);
+  if (dealerName || email) {
+    await pool.query(
+      `UPDATE users SET
+         name = CASE WHEN $2 <> '' THEN $2 ELSE name END,
+         email = CASE WHEN $3 <> '' THEN $3 ELSE email END
+       WHERE settings_id = $1 AND role = 'owner'`,
+      [outlet.settings_id, dealerName, email],
+    );
+  }
+}
+
 export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   async function log(user, outletId, action, detail, targetTable, targetId) {
     await pool.query(
@@ -866,7 +919,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   app.patch("/api/outlets/:id", wrap(async (req, res) => {
     const body = req.body ?? {};
     const touchesBrand = Object.prototype.hasOwnProperty.call(body, "brand");
-    const stationKeys = ["name", "address", "phone", "gstin", "ownerWhatsapp", "nextBillNo"];
+    const stationKeys = ["name", "code", "address", "phone", "gstin", "ownerWhatsapp", "nextBillNo"];
     const touchesStation = stationKeys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
     if (!touchesBrand && !touchesStation) throw bad("Nothing to save.");
     if (touchesBrand && req.user.role !== "owner" && req.user.role !== "super_admin") {
@@ -883,6 +936,15 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     }
     const name = String(body.name ?? "").trim();
     if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Station name is required.");
+    const code = String(body.code ?? "").trim();
+    if (Object.prototype.hasOwnProperty.call(body, "code") && !code) throw bad("Outlet code is required.");
+    if (code) {
+      const taken = await pool.query(
+        `SELECT id FROM outlets WHERE settings_id = $1 AND code = $2 AND id <> $3 LIMIT 1`,
+        [outlet.settings_id, code, outlet.id],
+      );
+      if (taken.rows.length) throw bad("That outlet code is already used.");
+    }
     let nextNo = null;
     if (Object.prototype.hasOwnProperty.call(body, "nextBillNo")) {
       nextNo = Math.round(Number(body.nextBillNo));
@@ -892,11 +954,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       `UPDATE outlets SET
          brand = CASE WHEN $2 THEN $3 ELSE brand END,
          name = CASE WHEN $4 THEN $5 ELSE name END,
-         address = CASE WHEN $6 THEN $7 ELSE address END,
-         phone = CASE WHEN $8 THEN $9 ELSE phone END,
-         gstin = CASE WHEN $10 THEN $11 ELSE gstin END,
-         owner_whatsapp = CASE WHEN $12 THEN $13 ELSE owner_whatsapp END,
-         next_bill_no = CASE WHEN $14 THEN $15 ELSE next_bill_no END
+         code = CASE WHEN $6 THEN $7 ELSE code END,
+         address = CASE WHEN $8 THEN $9 ELSE address END,
+         phone = CASE WHEN $10 THEN $11 ELSE phone END,
+         gstin = CASE WHEN $12 THEN $13 ELSE gstin END,
+         owner_whatsapp = CASE WHEN $14 THEN $15 ELSE owner_whatsapp END,
+         next_bill_no = CASE WHEN $16 THEN $17 ELSE next_bill_no END
        WHERE id = $1`,
       [
         outlet.id,
@@ -904,6 +967,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         brand,
         Object.prototype.hasOwnProperty.call(body, "name"),
         name,
+        Object.prototype.hasOwnProperty.call(body, "code"),
+        code,
         Object.prototype.hasOwnProperty.call(body, "address"),
         String(body.address ?? "").trim() || null,
         Object.prototype.hasOwnProperty.call(body, "phone"),
@@ -953,8 +1018,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         throw bad("The dealer saves settings.", 403);
       }
       let settingsId = req.user.settings_id;
+      let outlet = null;
       if (req.body.outletId) {
-        const outlet = await assertOutlet(pool, req.user, req.body.outletId);
+        outlet = await assertOutlet(pool, req.user, req.body.outletId);
         settingsId = outlet.settings_id;
       }
       if (!settingsId) throw bad("Pick a dealer first.");
@@ -963,6 +1029,14 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       const encoded = JSON.stringify(desk);
       if (encoded.length > 500000) throw bad("Settings are too large.");
       await pool.query(`UPDATE settings SET desk = $2::jsonb WHERE id = $1`, [settingsId, encoded]);
+      if (!outlet) {
+        const found = await pool.query(
+          `SELECT id, settings_id, code FROM outlets WHERE settings_id = $1 ORDER BY name LIMIT 1`,
+          [settingsId],
+        );
+        outlet = found.rows[0] ?? null;
+      }
+      if (outlet) await applyOutletFromDesk(pool, outlet, desk, bad);
     }
     await log(req.user, req.user.outlet_id, "settings", "Dealer settings updated", "settings", req.user.settings_id);
     res.json({ ok: true });

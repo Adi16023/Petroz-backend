@@ -195,10 +195,40 @@ app.get("/api/me", wrap(async (req, res) => {
   res.json(partyDto({ ...req.user, outlet_ids: outletIds }));
 }));
 
+function keptText(current, fallback) {
+  const value = typeof current === "string" ? current.trim() : "";
+  return value || (fallback == null ? "" : String(fallback));
+}
+
+function deskWithOutlet(desk, outlet, owner) {
+  const source = desk && typeof desk === "object" && !Array.isArray(desk) ? { ...desk } : {};
+  const basic = source.basic && typeof source.basic === "object" ? { ...source.basic } : {};
+  basic.outletName = keptText(basic.outletName, outlet?.name);
+  basic.code = keptText(basic.code, outlet?.code);
+  basic.phone = keptText(basic.phone, outlet?.phone);
+  basic.address = keptText(basic.address, outlet?.address);
+  basic.dealerName = keptText(basic.dealerName, owner?.name);
+  basic.email = keptText(basic.email, owner?.email);
+  source.basic = basic;
+  const invoice = source.invoice && typeof source.invoice === "object" ? { ...source.invoice } : {};
+  invoice.stationName = keptText(invoice.stationName, outlet?.name);
+  invoice.address = keptText(invoice.address, outlet?.address);
+  invoice.phone = keptText(invoice.phone, outlet?.phone);
+  invoice.gstin = keptText(invoice.gstin, outlet?.gstin);
+  source.invoice = invoice;
+  const preferences = source.preferences && typeof source.preferences === "object" ? { ...source.preferences } : {};
+  preferences.stationName = keptText(preferences.stationName, outlet?.name);
+  preferences.phone = keptText(preferences.phone, outlet?.phone);
+  preferences.email = keptText(preferences.email, owner?.email);
+  source.preferences = preferences;
+  return source;
+}
+
 app.get("/api/dealer", wrap(async (req, res) => {
   let settingsId = req.user.settings_id;
+  let outlet = null;
   if (req.query.outletId) {
-    const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+    outlet = await assertOutlet(pool, req.user, req.query.outletId);
     settingsId = outlet.settings_id;
   }
   if (!settingsId) {
@@ -212,6 +242,17 @@ app.get("/api/dealer", wrap(async (req, res) => {
     });
     return;
   }
+  if (!outlet) {
+    const found = await pool.query(
+      `SELECT id, name, code, address, phone, gstin FROM outlets WHERE settings_id = $1 ORDER BY name LIMIT 1`,
+      [settingsId],
+    );
+    outlet = found.rows[0] ?? null;
+  }
+  const owner = await pool.query(
+    `SELECT name, email FROM users WHERE settings_id = $1 AND role = 'owner' ORDER BY created_at LIMIT 1`,
+    [settingsId],
+  );
   const { rows } = await pool.query(`SELECT * FROM settings WHERE id = $1`, [settingsId]);
   const dealer = rows[0];
   if (!dealer) throw bad("Dealer not found.", 404);
@@ -222,7 +263,7 @@ app.get("/api/dealer", wrap(async (req, res) => {
     varianceAlert: num(dealer.variance_alert),
     auditorCanFileFindings: dealer.auditor_can_file_findings,
     schedules: dealer.schedules ?? [],
-    desk: dealer.desk && typeof dealer.desk === "object" && !Array.isArray(dealer.desk) ? dealer.desk : {},
+    desk: deskWithOutlet(dealer.desk, outlet, owner.rows[0]),
     companyImage: withImages ? dealer.company_image || null : null,
     bannerImage: withImages ? dealer.banner_image || null : null,
   });
@@ -231,7 +272,7 @@ app.get("/api/dealer", wrap(async (req, res) => {
 app.get("/api/outlets", wrap(async (req, res) => {
   const ids = await outletIdsFor(pool, req.user);
   const { rows } = await pool.query(
-    `SELECT id, name, code, brand FROM outlets WHERE id = ANY($1::uuid[]) ORDER BY name`,
+    `SELECT id, name, code, brand, address, phone, gstin FROM outlets WHERE id = ANY($1::uuid[]) ORDER BY name`,
     [ids],
   );
   res.json(rows);
