@@ -154,6 +154,18 @@ ALTER TABLE outlets ADD COLUMN IF NOT EXISTS phone text;
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS gstin text;
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS owner_whatsapp text;
 ALTER TABLE outlets ADD COLUMN IF NOT EXISTS next_bill_no integer;
+ALTER TABLE outlets ADD COLUMN IF NOT EXISTS desk jsonb NOT NULL DEFAULT '{}'::jsonb;
+
+UPDATE outlets o
+SET desk = s.desk
+FROM settings s
+WHERE o.settings_id = s.id
+  AND o.desk = '{}'::jsonb
+  AND s.desk <> '{}'::jsonb
+  AND (
+    lower(o.name) = lower(COALESCE(s.desk->'basic'->>'outletName', ''))
+    OR (SELECT count(*) FROM outlets x WHERE x.settings_id = s.id) = 1
+  );
 
 CREATE TABLE IF NOT EXISTS users (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

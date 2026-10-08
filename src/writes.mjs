@@ -916,6 +916,41 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
 
   const FUEL_BRANDS = ["iocl", "bpcl", "hpcl", "nayara", "jio-bp", "shell", "reliance", "mrpl"];
 
+  app.post("/api/outlets", wrap(async (req, res) => {
+    if (req.user.role !== "owner" && req.user.role !== "super_admin") {
+      throw bad("The dealer adds outlets.", 403);
+    }
+    const settingsId = req.user.settings_id;
+    if (!settingsId) throw bad("Pick a dealer first.");
+    const name = String(req.body?.name ?? "").trim();
+    const code = String(req.body?.code ?? "").trim().toUpperCase();
+    const phone = String(req.body?.phone ?? "").trim();
+    const address = String(req.body?.address ?? "").trim();
+    if (!name) throw bad("Outlet name is required.");
+    if (!code) throw bad("Outlet code is required.");
+    const taken = await pool.query(
+      `SELECT id FROM outlets WHERE settings_id = $1 AND lower(code) = lower($2) LIMIT 1`,
+      [settingsId, code],
+    );
+    if (taken.rows.length) throw bad("That outlet code is already used.");
+    const { rows } = await pool.query(
+      `INSERT INTO outlets (settings_id, name, code, phone, address)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, name, code, address, phone, brand`,
+      [settingsId, name, code, phone || null, address || null],
+    );
+    const outlet = rows[0];
+    await log(req.user, outlet.id, "created", name, "outlets", outlet.id);
+    res.status(201).json({
+      id: outlet.id,
+      name: outlet.name,
+      code: outlet.code,
+      address: outlet.address,
+      phone: outlet.phone,
+      brand: outlet.brand,
+    });
+  }));
+
   app.patch("/api/outlets/:id", wrap(async (req, res) => {
     const body = req.body ?? {};
     const touchesBrand = Object.prototype.hasOwnProperty.call(body, "brand");
@@ -1028,7 +1063,6 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (!desk || typeof desk !== "object" || Array.isArray(desk)) throw bad("Settings must be an object.");
       const encoded = JSON.stringify(desk);
       if (encoded.length > 500000) throw bad("Settings are too large.");
-      await pool.query(`UPDATE settings SET desk = $2::jsonb WHERE id = $1`, [settingsId, encoded]);
       if (!outlet) {
         const found = await pool.query(
           `SELECT id, settings_id, code FROM outlets WHERE settings_id = $1 ORDER BY name LIMIT 1`,
@@ -1036,7 +1070,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         );
         outlet = found.rows[0] ?? null;
       }
-      if (outlet) await applyOutletFromDesk(pool, outlet, desk, bad);
+      if (outlet) {
+        await pool.query(`UPDATE outlets SET desk = $2::jsonb WHERE id = $1`, [outlet.id, encoded]);
+        await applyOutletFromDesk(pool, outlet, desk, bad);
+      } else {
+        await pool.query(`UPDATE settings SET desk = $2::jsonb WHERE id = $1`, [settingsId, encoded]);
+      }
     }
     await log(req.user, req.user.outlet_id, "settings", "Dealer settings updated", "settings", req.user.settings_id);
     res.json({ ok: true });

@@ -256,6 +256,13 @@ app.get("/api/dealer", wrap(async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM settings WHERE id = $1`, [settingsId]);
   const dealer = rows[0];
   if (!dealer) throw bad("Dealer not found.", 404);
+  let storedDesk = dealer.desk;
+  if (outlet?.id) {
+    const own = await pool.query(`SELECT desk FROM outlets WHERE id = $1`, [outlet.id]);
+    const outletDesk = own.rows[0]?.desk;
+    const filled = outletDesk && typeof outletDesk === "object" && !Array.isArray(outletDesk) && Object.keys(outletDesk).length > 0;
+    if (filled) storedDesk = outletDesk;
+  }
   const withImages = req.query.images === "1";
   res.json({
     id: dealer.id,
@@ -263,7 +270,7 @@ app.get("/api/dealer", wrap(async (req, res) => {
     varianceAlert: num(dealer.variance_alert),
     auditorCanFileFindings: dealer.auditor_can_file_findings,
     schedules: dealer.schedules ?? [],
-    desk: deskWithOutlet(dealer.desk, outlet, owner.rows[0]),
+    desk: deskWithOutlet(storedDesk, outlet, owner.rows[0]),
     companyImage: withImages ? dealer.company_image || null : null,
     bannerImage: withImages ? dealer.banner_image || null : null,
   });
