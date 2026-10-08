@@ -131,6 +131,7 @@ CREATE TABLE IF NOT EXISTS settings (
 
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS company_image text;
 ALTER TABLE settings ADD COLUMN IF NOT EXISTS banner_image text;
+ALTER TABLE settings ADD COLUMN IF NOT EXISTS desk jsonb NOT NULL DEFAULT '{}'::jsonb;
 
 CREATE TABLE IF NOT EXISTS outlets (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

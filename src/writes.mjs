@@ -948,6 +948,22 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         [req.user.settings_id, JSON.stringify([{ name: req.body.schedule.name, cadence: req.body.schedule.cadence || "" }])],
       );
     }
+    if (req.body != null && Object.prototype.hasOwnProperty.call(req.body, "desk")) {
+      if (req.user.role !== "owner" && req.user.role !== "super_admin") {
+        throw bad("The dealer saves settings.", 403);
+      }
+      let settingsId = req.user.settings_id;
+      if (req.body.outletId) {
+        const outlet = await assertOutlet(pool, req.user, req.body.outletId);
+        settingsId = outlet.settings_id;
+      }
+      if (!settingsId) throw bad("Pick a dealer first.");
+      const desk = req.body.desk;
+      if (!desk || typeof desk !== "object" || Array.isArray(desk)) throw bad("Settings must be an object.");
+      const encoded = JSON.stringify(desk);
+      if (encoded.length > 500000) throw bad("Settings are too large.");
+      await pool.query(`UPDATE settings SET desk = $2::jsonb WHERE id = $1`, [settingsId, encoded]);
+    }
     await log(req.user, req.user.outlet_id, "settings", "Dealer settings updated", "settings", req.user.settings_id);
     res.json({ ok: true });
   }));

@@ -208,6 +208,7 @@ app.get("/api/dealer", wrap(async (req, res) => {
       varianceAlert: 200,
       auditorCanFileFindings: false,
       schedules: [],
+      desk: {},
     });
     return;
   }
@@ -221,6 +222,7 @@ app.get("/api/dealer", wrap(async (req, res) => {
     varianceAlert: num(dealer.variance_alert),
     auditorCanFileFindings: dealer.auditor_can_file_findings,
     schedules: dealer.schedules ?? [],
+    desk: dealer.desk && typeof dealer.desk === "object" && !Array.isArray(dealer.desk) ? dealer.desk : {},
     companyImage: withImages ? dealer.company_image || null : null,
     bannerImage: withImages ? dealer.banner_image || null : null,
   });
