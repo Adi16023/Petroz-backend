@@ -214,7 +214,6 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       ? shift.entry.meters
       : {};
     const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(row.qty)]));
-    const closing = new Map(readings.rows.filter((row) => row.kind === "closing").map((row) => [row.equipment_id, num(row.qty)]));
     const prev = new Map(previous.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const fuelByNozzle = new Map(fuel.rows.map((row) => [row.equipment_id, row]));
     const recentByNozzle = new Map();
@@ -248,11 +247,11 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       nozzles: nozzles.rows.map((row) => {
         const savedOpen = opening.has(row.id);
         const openQty = savedOpen ? opening.get(row.id) ?? 0 : prev.get(row.id) ?? 0;
-        const closeQty = closing.get(row.id);
         const line = fuelByNozzle.get(row.id);
-        const sold = savedOpen && closeQty != null ? closeQty - openQty : num(line?.qty);
         const baseline = prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const savedPrevious = savedMeters[row.id];
+        const previousReading = savedPrevious == null || savedPrevious === "" ? baseline : num(savedPrevious) ?? baseline;
+        const sold = round2(openQty - previousReading);
         return {
           id: row.id,
           label: row.label,
@@ -426,12 +425,12 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
             );
           }
         }
-        const sold = Math.max(0, money(row.qty));
+        const sold = Math.max(0, round2(opening - money(row.previous)));
         const test = Math.min(sold, Math.max(0, money(row.test)));
         const rate = Math.max(0, money(row.rate));
         const netQty = Math.max(0, sold - test);
         const amount = round2(netQty * rate);
-        const closing = opening + sold;
+        const closing = opening;
         await client.query(
           `INSERT INTO dip_readings (shift_id, equipment_id, user_id, kind, qty)
            VALUES ($1, $2, $3, 'opening'::reading_kind, $4), ($1, $2, $3, 'closing'::reading_kind, $5)`,
