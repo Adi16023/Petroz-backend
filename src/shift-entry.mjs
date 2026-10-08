@@ -27,6 +27,21 @@ function atOnShift(startsAt, timeText) {
   return Number.isFinite(at.getTime()) ? at.toISOString() : new Date().toISOString();
 }
 
+const CASH_NOTES = [10, 20, 50, 100, 200, 500];
+
+function cashCountOf(raw) {
+  const source = raw?.cashCount && typeof raw.cashCount === "object" ? raw.cashCount : {};
+  const count = {};
+  for (const note of CASH_NOTES) {
+    const n = num(source[note] ?? source[String(note)]);
+    const qty = n == null || n < 0 ? 0 : Math.round(n);
+    count[String(note)] = Math.min(qty, 100000);
+  }
+  const coins = num(source.coins);
+  count.coins = coins == null || coins < 0 ? 0 : Math.round(coins * 100) / 100;
+  return count;
+}
+
 function entryOf(body) {
   const raw = body?.entry && typeof body.entry === "object" ? body.entry : {};
   const totals = raw.totals && typeof raw.totals === "object" ? raw.totals : {};
@@ -49,6 +64,7 @@ function entryOf(body) {
       credit: num(totals.credit) ?? 0,
       other: num(totals.other) ?? 0,
     },
+    cashCount: cashCountOf(raw),
     totalNotes: {
       cash: clip(notes.cash, 200),
       card: clip(notes.card, 200),
