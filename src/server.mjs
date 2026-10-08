@@ -387,15 +387,6 @@ app.post("/api/dealers", wrap(async (req, res) => {
 }));
 
 const DIRECTORY_ROLES = ["owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor", "supplier", "bank", "provider"];
-const DIRECTORY_STAFF = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
-const DIRECTORY_STAFF_LABEL = {
-  cashier: "Cashier",
-  pump_boy: "Pump operator",
-  supervisor: "Supervisor",
-  air_boy: "Air boy",
-  dsm: "Dealer salesman",
-  custom: "Staff",
-};
 
 app.post("/api/admin/outlets", wrap(async (req, res) => {
   requireSuper(req.user);
@@ -450,15 +441,11 @@ app.post("/api/admin/users", wrap(async (req, res) => {
   if (!name) throw bad("Name is required.");
   if (!digits) throw bad("Mobile is required.");
   if (password.length < 4) throw bad("Password must be at least 4 characters.");
+  if (role === "staff" || role === "manager") throw bad("Add a dealer. Staff and managers are created by the dealer.");
   if (!DIRECTORY_ROLES.includes(role)) throw bad("Pick a role.");
-  let staffType = null;
+  const staffType = null;
   let designation = "Staff";
-  if (role === "staff") {
-    staffType = String(req.body?.staffType ?? "");
-    if (!DIRECTORY_STAFF.includes(staffType)) throw bad("Pick a staff type.");
-    designation = DIRECTORY_STAFF_LABEL[staffType];
-  } else if (role === "manager") designation = "Manager";
-  else if (role === "owner") designation = "Dealer";
+  if (role === "owner") designation = "Dealer";
   else if (role === "credit_customer") designation = "Credit customer";
   else if (role === "accounts_auditor") designation = "Accounts auditor";
   else designation = role.slice(0, 1).toUpperCase() + role.slice(1);

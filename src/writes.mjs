@@ -677,8 +677,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   function stockKl(fuel, litres) {
     const amount = money(litres);
     const key = String(fuel ?? "").trim().toLowerCase();
-    if (["petrol", "diesel", "power", "ms", "hsd"].includes(key)) return amount / 1000;
-    return amount;
+    if (!key || key === "cng" || key.includes("ev")) return amount;
+    return amount / 1000;
   }
 
   app.post("/api/equipment", wrap(async (req, res) => {

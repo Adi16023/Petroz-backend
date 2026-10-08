@@ -15,8 +15,8 @@ function fuelKey(value) {
 function stockKl(fuel, value) {
   const amount = money(value);
   const key = fuelKey(fuel);
-  if (key === "petrol" || key === "diesel" || key === "power" || key === "ms" || key === "hsd") return amount / 1000;
-  return amount;
+  if (!key || key === "cng" || key.includes("ev")) return amount;
+  return amount / 1000;
 }
 
 function sameQty(left, right) {
