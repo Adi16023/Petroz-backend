@@ -125,16 +125,23 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
         tankByFuel.set(key, parentId);
         keptTanks.push(parentId);
       }
+      const previous = String(slot.previous ?? "").trim();
+      const meter = previous === "" ? null : money(previous);
       const { rows } = await pool.query(
         `INSERT INTO equipment (outlet_id, parent_id, product_id, kind, label, meter, settings_ref)
-         VALUES ($1, $2, $3, 'nozzle', $4, 0, $5)
+         VALUES ($1, $2, $3, 'nozzle', $4, COALESCE($5, 0), $6)
          ON CONFLICT (outlet_id, settings_ref) WHERE settings_ref IS NOT NULL AND settings_ref <> ''
          DO UPDATE SET
            parent_id = EXCLUDED.parent_id,
            product_id = EXCLUDED.product_id,
-           label = EXCLUDED.label
+           label = EXCLUDED.label,
+           meter = CASE
+             WHEN EXISTS (SELECT 1 FROM dip_readings r WHERE r.equipment_id = equipment.id) THEN equipment.meter
+             WHEN $5::numeric IS NULL THEN equipment.meter
+             ELSE $5
+           END
          RETURNING id`,
-        [outletId, parentId, productId, `${pumpName} N${index + 1}`, `nozzle:${pumpId}:${index}`],
+        [outletId, parentId, productId, `${pumpName} N${index + 1}`, meter, `nozzle:${pumpId}:${index}`],
       );
       keptNozzles.push(rows[0].id);
     }

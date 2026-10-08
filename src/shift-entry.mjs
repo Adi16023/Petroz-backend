@@ -209,6 +209,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       ),
     ]);
 
+    const savedMeters = shift.entry && typeof shift.entry === "object" && shift.entry.meters && typeof shift.entry.meters === "object"
+      ? shift.entry.meters
+      : {};
     const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(row.qty)]));
     const closing = new Map(readings.rows.filter((row) => row.kind === "closing").map((row) => [row.equipment_id, num(row.qty)]));
     const prev = new Map(previous.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
@@ -247,12 +250,14 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const closeQty = closing.get(row.id);
         const line = fuelByNozzle.get(row.id);
         const sold = savedOpen && closeQty != null ? closeQty - openQty : num(line?.qty);
+        const baseline = prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0;
+        const savedPrevious = savedMeters[row.id];
         return {
           id: row.id,
           label: row.label,
           fuel: row.product_name || "Fuel",
           unit: row.unit || "L",
-          previous: prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0,
+          previous: savedPrevious == null || savedPrevious === "" ? baseline : num(savedPrevious) ?? baseline,
           opening: savedOpen ? openQty : (prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0),
           qty: sold ?? 0,
           test: num(line?.test_qty) ?? 0,
@@ -329,8 +334,14 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const { shift, outlet } = await loadShift(req, req.params.id);
     if (shift.status === "closed") throw bad("This shift is already closed.");
     const submit = Boolean(req.body?.submit);
-    const entry = entryOf(req.body);
     const pumps = Array.isArray(req.body?.pumps) ? req.body.pumps : [];
+    const meters = {};
+    for (const row of pumps) {
+      const id = uuidOrNull(row.equipmentId);
+      if (!id || row.previous == null || row.previous === "") continue;
+      meters[id] = money(row.previous);
+    }
+    const entry = { ...entryOf(req.body), meters };
     const lubes = Array.isArray(req.body?.lubes) ? req.body.lubes : [];
     const payments = Array.isArray(req.body?.payments) ? req.body.payments : [];
     const expenses = Array.isArray(req.body?.expenses) ? req.body.expenses : [];
@@ -396,6 +407,17 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const nozzle = id ? nozzleById.get(id) : null;
         if (!nozzle) continue;
         const opening = money(row.opening);
+        if (row.previous != null && row.previous !== "") {
+          await client.query(
+            `UPDATE equipment SET meter = $2
+             WHERE id = $1
+               AND NOT EXISTS (
+                 SELECT 1 FROM dip_readings r
+                 WHERE r.equipment_id = $1 AND r.kind = 'closing' AND r.shift_id IS DISTINCT FROM $3
+               )`,
+            [nozzle.id, money(row.previous), shift.id],
+          );
+        }
         const sold = Math.max(0, money(row.qty));
         const test = Math.min(sold, Math.max(0, money(row.test)));
         const rate = Math.max(0, money(row.rate));
