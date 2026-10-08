@@ -120,8 +120,9 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
     if (key && !tankByFuel.has(key)) tankByFuel.set(key, rows[0].id);
   }
 
+  const pumps = list(desk.pumps);
   const keptNozzles = [];
-  for (const pump of list(desk.pumps)) {
+  if (pumps.length) for (const pump of pumps) {
     const pumpId = String(pump?.id ?? "").trim();
     if (!pumpId || pump.on === false) continue;
     const pumpName = String(pump?.name ?? "").trim() || "Pump";
@@ -149,23 +150,33 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk }) {
       }
       const previous = String(slot.previous ?? "").trim();
       const meter = previous === "" ? null : money(previous);
+      const label = `${pumpName} N${index + 1}`;
+      const ref = `nozzle:${pumpId}:${index}`;
+      await pool.query(
+        `UPDATE equipment
+         SET settings_ref = $3, pump_name = $4
+         WHERE outlet_id = $1 AND kind = 'nozzle' AND label = $2
+           AND (settings_ref IS NULL OR settings_ref = $3)`,
+        [outletId, label, ref, pumpName],
+      );
       const { rows } = await pool.query(
-        `INSERT INTO equipment (outlet_id, parent_id, product_id, kind, label, meter, settings_ref)
-         VALUES ($1, $2, $3, 'nozzle', $4, COALESCE($5, 0), $6)
+        `INSERT INTO equipment (outlet_id, parent_id, product_id, kind, label, meter, pump_name, settings_ref)
+         VALUES ($1, $2, $3, 'nozzle', $4, COALESCE($5::numeric, 0), $6, $7)
          ON CONFLICT (outlet_id, settings_ref) WHERE settings_ref IS NOT NULL AND settings_ref <> ''
          DO UPDATE SET
            parent_id = EXCLUDED.parent_id,
            product_id = EXCLUDED.product_id,
-           label = EXCLUDED.label
+           label = EXCLUDED.label,
+           pump_name = EXCLUDED.pump_name
          RETURNING id`,
-        [outletId, parentId, productId, `${pumpName} N${index + 1}`, meter, `nozzle:${pumpId}:${index}`],
+        [outletId, parentId, productId, label, meter, pumpName, ref],
       );
       if (meter != null) await appendPreviousClosing(pool, rows[0].id, meter);
       keptNozzles.push(rows[0].id);
     }
   }
 
-  await pool.query(
+  if (pumps.length) await pool.query(
     `DELETE FROM equipment e
      WHERE e.outlet_id = $1
        AND e.kind = 'nozzle'

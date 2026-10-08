@@ -793,6 +793,8 @@ app.get("/api/equipment", wrap(async (req, res) => {
     capacity: num(row.capacity),
     liveQty: num(row.live_qty),
     meter: num(row.meter),
+    pumpName: row.pump_name,
+    settingsRef: row.settings_ref,
     tolerance: num(row.tolerance),
     dipChart: row.dip_chart ?? [],
   });

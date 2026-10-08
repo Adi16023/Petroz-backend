@@ -1077,7 +1077,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (!settingsId) throw bad("Pick a dealer first.");
       const desk = req.body.desk;
       if (!desk || typeof desk !== "object" || Array.isArray(desk)) throw bad("Settings must be an object.");
-      const encoded = JSON.stringify(desk);
+      const storedDesk = { ...desk };
+      delete storedDesk.pumps;
+      const encoded = JSON.stringify(storedDesk);
       if (encoded.length > 500000) throw bad("Settings are too large.");
       if (!outlet) {
         const found = await pool.query(

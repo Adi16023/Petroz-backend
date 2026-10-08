@@ -514,6 +514,10 @@ CREATE INDEX IF NOT EXISTS users_role_idx ON users (role);
 CREATE INDEX IF NOT EXISTS users_outlet_idx ON users (outlet_id);
 ALTER TABLE products ADD COLUMN IF NOT EXISTS settings_ref text;
 ALTER TABLE equipment ADD COLUMN IF NOT EXISTS settings_ref text;
+ALTER TABLE equipment ADD COLUMN IF NOT EXISTS pump_name text;
+UPDATE equipment
+SET pump_name = regexp_replace(label, ' N[0-9]+$', '')
+WHERE kind = 'nozzle' AND (pump_name IS NULL OR pump_name = '');
 
 CREATE UNIQUE INDEX IF NOT EXISTS products_settings_ref_uidx
   ON products (settings_id, settings_ref)
