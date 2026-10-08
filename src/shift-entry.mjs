@@ -342,6 +342,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       meters[id] = money(row.previous);
     }
     const entry = { ...entryOf(req.body), meters };
+    const kept = shift.entry && typeof shift.entry === "object" ? shift.entry : {};
+    if (Array.isArray(kept.cashierIds)) entry.cashierIds = kept.cashierIds;
+    if (Array.isArray(kept.nozzleIds)) entry.nozzleIds = kept.nozzleIds;
     const lubes = Array.isArray(req.body?.lubes) ? req.body.lubes : [];
     const payments = Array.isArray(req.body?.payments) ? req.body.payments : [];
     const expenses = Array.isArray(req.body?.expenses) ? req.body.expenses : [];

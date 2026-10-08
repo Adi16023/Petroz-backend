@@ -25,6 +25,12 @@ function money(value) {
   return Number.isFinite(n) ? n : 0;
 }
 
+function uuidList(value) {
+  const ids = Array.isArray(value) ? [...new Set(value.map((id) => String(id)))] : [];
+  const valid = ids.every((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+  return valid ? ids : null;
+}
+
 function round2(value) {
   if (!Number.isFinite(value)) return 0;
   const negative = value < 0;
@@ -910,10 +916,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const status = now >= endMs ? "closed" : now >= startMs ? "open" : "upcoming";
     const startIso = new Date(startMs).toISOString();
     const endIso = new Date(endMs).toISOString();
-    const requested = Array.isArray(req.body?.staffIds) ? [...new Set(req.body.staffIds.map((id) => String(id)))] : [];
-    if (requested.some((id) => !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))) {
-      throw bad("Pick staff from this outlet.");
-    }
+    const requested = uuidList(req.body?.staffIds);
+    const cashierIds = uuidList(req.body?.cashierIds);
+    const nozzleIds = uuidList(req.body?.nozzleIds);
+    if (!requested) throw bad("Pick staff from this outlet.");
+    if (!cashierIds) throw bad("Pick cashiers from this outlet.");
+    if (!nozzleIds) throw bad("Pick nozzles from this outlet.");
     let duties = [];
     if (requested.length) {
       const found = await pool.query(
@@ -935,11 +943,31 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         checkedOutAt: null,
       }));
     }
+    if (cashierIds.length) {
+      const found = await pool.query(
+        `SELECT id FROM users
+         WHERE id = ANY($1::uuid[])
+           AND settings_id = $2
+           AND staff_type = 'cashier'
+           AND active = true
+           AND (outlet_id IS NULL OR outlet_id = $3)`,
+        [cashierIds, outlet.settings_id, outlet.id],
+      );
+      if (found.rows.length !== cashierIds.length) throw bad("Pick cashiers from this outlet.");
+    }
+    if (nozzleIds.length) {
+      const found = await pool.query(
+        `SELECT id FROM equipment
+         WHERE id = ANY($1::uuid[]) AND outlet_id = $2 AND kind = 'nozzle'`,
+        [nozzleIds, outlet.id],
+      );
+      if (found.rows.length !== nozzleIds.length) throw bad("Pick nozzles from this outlet.");
+    }
     const { rows } = await pool.query(
-      `INSERT INTO shifts (outlet_id, label, starts_at, ends_at, status, duties)
-       VALUES ($1, $2, $3, $4, $5::shift_status, $6::jsonb)
+      `INSERT INTO shifts (outlet_id, label, starts_at, ends_at, status, duties, entry)
+       VALUES ($1, $2, $3, $4, $5::shift_status, $6::jsonb, $7::jsonb)
        RETURNING id`,
-      [outlet.id, label, startIso, endIso, status, JSON.stringify(duties)],
+      [outlet.id, label, startIso, endIso, status, JSON.stringify(duties), JSON.stringify({ cashierIds, nozzleIds })],
     );
     await log(req.user, outlet.id, "shift", `Opened ${label}`, "shifts", rows[0].id);
     res.status(201).json({ id: rows[0].id, staffIds: duties.map((duty) => duty.userId) });
