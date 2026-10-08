@@ -397,6 +397,48 @@ const DIRECTORY_STAFF_LABEL = {
   custom: "Staff",
 };
 
+app.post("/api/admin/outlets", wrap(async (req, res) => {
+  requireSuper(req.user);
+  const name = String(req.body?.name ?? "").trim();
+  if (!name) throw bad("Outlet name is required.");
+  const rawCode = String(req.body?.code ?? "").trim().toUpperCase();
+  const code = (rawCode || name.replace(/[^a-z]/gi, "").toUpperCase().slice(0, 4) || "OUT").slice(0, 12);
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const settings = await client.query(
+      `INSERT INTO settings (auto_approve_below, variance_alert) VALUES (500, 200) RETURNING id`,
+    );
+    const created = await client.query(
+      `INSERT INTO outlets (settings_id, name, code, address, phone, gstin, city)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, name`,
+      [
+        settings.rows[0].id,
+        name,
+        code,
+        String(req.body?.address ?? "").trim() || null,
+        String(req.body?.phone ?? "").trim() || null,
+        String(req.body?.gstin ?? "").trim() || null,
+        String(req.body?.city ?? "").trim() || null,
+      ],
+    );
+    await client.query(
+      `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+       VALUES ($1, $2, 'created', $3, 'outlets', $1)`,
+      [created.rows[0].id, req.user.id, name],
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ id: created.rows[0].id, name: created.rows[0].name });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    if (error.code === "23505") throw bad("That outlet code is already used.");
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.post("/api/admin/users", wrap(async (req, res) => {
   requireSuper(req.user);
   const name = String(req.body?.name ?? "").trim();
