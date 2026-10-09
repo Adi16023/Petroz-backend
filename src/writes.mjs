@@ -68,8 +68,12 @@ function payMode(value) {
 
 function day(value) {
   if (!value || value === "Today") return new Date().toISOString().slice(0, 10);
-  const text = String(value).slice(0, 10);
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : new Date().toISOString().slice(0, 10);
+  const text = String(value).trim();
+  if (/^\d{4}-\d{2}-\d{2}/.test(text)) return text.slice(0, 10);
+  const match = text.match(/^(\d{2})\/(\d{2})\/(\d{2}|\d{4})$/);
+  if (!match) return new Date().toISOString().slice(0, 10);
+  const year = match[3].length === 2 ? 2000 + Number(match[3]) : Number(match[3]);
+  return `${year}-${match[2]}-${match[1]}`;
 }
 
 function optionalDay(value) {
@@ -410,6 +414,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           put("net", total);
         }
         if (Object.prototype.hasOwnProperty.call(req.body, "dueDate")) put("due_date", optionalDay(req.body.dueDate));
+        if (Object.prototype.hasOwnProperty.call(req.body, "docDate")) put("doc_date", day(req.body.docDate));
+        if (Object.prototype.hasOwnProperty.call(req.body, "note")) put("note", String(req.body.note ?? "").trim() || null);
         if (status) {
           put("status", status);
           put("decided_by", req.user.id);
