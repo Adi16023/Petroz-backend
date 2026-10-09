@@ -230,8 +230,11 @@ CREATE TABLE IF NOT EXISTS products (
   gst numeric(5, 2),
   purchase_price numeric(14, 2),
   selling_price numeric(14, 2),
+  price_at timestamptz,
   created_at timestamptz NOT NULL DEFAULT now()
 );
+
+ALTER TABLE products ADD COLUMN IF NOT EXISTS price_at timestamptz;
 
 CREATE TABLE IF NOT EXISTS equipment (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -611,6 +614,17 @@ CREATE TABLE IF NOT EXISTS vendors (
 
 CREATE INDEX IF NOT EXISTS vendors_outlet_idx ON vendors (outlet_id, lower(name));
 
+CREATE TABLE IF NOT EXISTS temp_credit_customers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,
+  name text NOT NULL,
+  phone text NOT NULL DEFAULT '',
+  vehicle text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS temp_credit_customers_outlet_idx ON temp_credit_customers (outlet_id, lower(name));
+
 CREATE TABLE IF NOT EXISTS bank_accounts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,
@@ -631,7 +645,8 @@ CROSS JOIN (
     ('credit', 'Credit', 2),
     ('upi', 'UPI', 3),
     ('card', 'Card', 4),
-    ('fleet', 'Fleet Card', 5)
+    ('fleet', 'Fleet Card', 5),
+    ('temp_credit', 'Temporary Credit', 6)
 ) AS v(code, name, sort)
 ON CONFLICT (outlet_id, code) DO NOTHING;
 

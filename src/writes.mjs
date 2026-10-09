@@ -51,6 +51,7 @@ function payMode(value) {
   const v = String(value ?? "").trim().toLowerCase();
   if (!v) return null;
   if (v === "fleet" || v === "fleet card" || v === "fleet_card") return "fleet";
+  if (v === "temp_credit" || v === "temporary_credit" || v === "temporary credit" || v === "temporarycredit") return "temp_credit";
   if (/^[a-z][a-z0-9_]{0,31}$/.test(v)) return v;
   if (v === "upi" || v.includes("upi")) return "upi";
   if (v === "card" || (v.includes("card") && !v.includes("fleet"))) return "card";
@@ -693,6 +694,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
          gst = CASE WHEN $6 THEN $7 ELSE gst END,
          purchase_price = CASE WHEN $8 THEN $9 ELSE purchase_price END,
          selling_price = CASE WHEN $10 THEN $11 ELSE selling_price END,
+         price_at = CASE WHEN $10 THEN now() ELSE price_at END,
          active = CASE WHEN $12 THEN $13 ELSE active END
        WHERE id = $1`,
       [

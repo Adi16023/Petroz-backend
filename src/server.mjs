@@ -334,7 +334,8 @@ async function ensurePaymentMethods(outletId) {
        ('credit', 'Credit', 2),
        ('upi', 'UPI', 3),
        ('card', 'Card', 4),
-       ('fleet', 'Fleet Card', 5)
+       ('fleet', 'Fleet Card', 5),
+       ('temp_credit', 'Temporary Credit', 6)
      ) AS v(code, name, sort)
      ON CONFLICT (outlet_id, code) DO NOTHING`,
     [outletId],
@@ -433,6 +434,49 @@ app.patch("/api/vendors/:id", wrap(async (req, res) => {
     [req.params.id, name, phone, serviceType, address, outlet.id],
   );
   res.json(vendorDto(rows[0]));
+}));
+
+function tempCreditDto(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    phone: row.phone ?? "",
+    vehicle: row.vehicle ?? "",
+    outstanding: num(row.outstanding) ?? 0,
+  };
+}
+
+app.get("/api/temp-credit-customers", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  const { rows } = await pool.query(
+    `SELECT c.id, c.name, c.phone, c.vehicle,
+            COALESCE((
+              SELECT SUM(s.net) FROM sales s
+              WHERE s.reference = c.id::text
+                AND s.category = 'shift_temp_credit'
+                AND s.status <> 'cancelled'
+            ), 0) AS outstanding
+     FROM temp_credit_customers c
+     WHERE c.outlet_id = $1
+     ORDER BY c.name`,
+    [outlet.id],
+  );
+  res.json(rows.map(tempCreditDto));
+}));
+
+app.post("/api/temp-credit-customers", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+  const name = String(req.body?.name ?? "").trim();
+  const phone = String(req.body?.phone ?? "").trim();
+  const vehicle = String(req.body?.vehicle ?? "").trim();
+  if (!name) throw bad("Enter the customer name.");
+  const { rows } = await pool.query(
+    `INSERT INTO temp_credit_customers (outlet_id, name, phone, vehicle)
+     VALUES ($1, $2, $3, $4)
+     RETURNING id, name, phone, vehicle, 0::numeric AS outstanding`,
+    [outlet.id, name, phone, vehicle],
+  );
+  res.status(201).json(tempCreditDto(rows[0]));
 }));
 
 app.get("/api/bank-accounts", wrap(async (req, res) => {
