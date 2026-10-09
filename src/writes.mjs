@@ -395,6 +395,54 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       const row = found.rows[0];
       if (!row) continue;
       await assertOutlet(pool, req.user, row.outlet_id);
+      if (table === "purchases" && req.body?.line) {
+        const sets = [];
+        const params = [row.id];
+        const put = (column, value) => {
+          params.push(value);
+          sets.push(`${column} = $${params.length}`);
+        };
+        if (Object.prototype.hasOwnProperty.call(req.body, "reference")) put("reference", String(req.body.reference ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body, "docNo")) put("doc_no", String(req.body.docNo ?? "").trim() || null);
+        if (req.body.amount != null && req.body.amount !== "") {
+          const total = money(req.body.amount);
+          put("amount", total);
+          put("net", total);
+        }
+        if (Object.prototype.hasOwnProperty.call(req.body, "dueDate")) put("due_date", optionalDay(req.body.dueDate));
+        if (status) {
+          put("status", status);
+          put("decided_by", req.user.id);
+        }
+        if (sets.length) await pool.query(`UPDATE purchases SET ${sets.join(", ")} WHERE id = $1`, params);
+        const line = req.body.line;
+        const item = await pool.query(`SELECT id FROM purchase_items WHERE purchase_id = $1 ORDER BY id LIMIT 1`, [row.id]);
+        if (item.rows[0]) {
+          const product = line.description ? await productId(req.user, line.description) : null;
+          await pool.query(
+            `UPDATE purchase_items
+             SET description = COALESCE($2, description),
+                 product_id = COALESCE($3, product_id),
+                 qty = COALESCE($4, qty),
+                 rate = COALESCE($5, rate),
+                 amount = COALESCE($6, amount),
+                 qty_received = COALESCE($7, qty_received)
+             WHERE id = $1`,
+            [
+              item.rows[0].id,
+              line.description == null || line.description === "" ? null : String(line.description),
+              product,
+              line.qty == null || line.qty === "" ? null : money(line.qty),
+              line.rate == null || line.rate === "" ? null : money(line.rate),
+              line.amount == null || line.amount === "" ? null : money(line.amount),
+              line.qtyReceived == null || line.qtyReceived === "" ? null : money(line.qtyReceived),
+            ],
+          );
+        }
+        await log(req.user, row.outlet_id, "updated", `purchases ${status ?? "edited"}`, table, row.id);
+        res.json({ id: row.id, status: status ?? null });
+        return;
+      }
       if (status) {
         const decided = table === "expenses" || table === "purchases" ? ", decided_by = $3" : "";
         await pool.query(
