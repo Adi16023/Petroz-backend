@@ -599,6 +599,18 @@ CREATE TABLE IF NOT EXISTS payment_methods (
   UNIQUE (outlet_id, code)
 );
 
+CREATE TABLE IF NOT EXISTS vendors (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,
+  name text NOT NULL,
+  phone text NOT NULL DEFAULT '',
+  service_type text NOT NULL DEFAULT '',
+  address text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS vendors_outlet_idx ON vendors (outlet_id, lower(name));
+
 CREATE TABLE IF NOT EXISTS bank_accounts (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,

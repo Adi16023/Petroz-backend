@@ -304,6 +304,16 @@ function paymentDto(row) {
   return { id: row.id, code: row.code, name: row.name, active: row.active, sort: row.sort };
 }
 
+function vendorDto(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    phone: row.phone,
+    serviceType: row.service_type,
+    address: row.address,
+  };
+}
+
 function bankDto(row) {
   return {
     id: row.id,
@@ -372,6 +382,35 @@ app.put("/api/payment-methods", wrap(async (req, res) => {
   }
   const rows = await ensurePaymentMethods(outlet.id);
   res.json(rows.map(paymentDto));
+}));
+
+app.get("/api/vendors", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  const { rows } = await pool.query(
+    `SELECT id, name, phone, service_type, address
+     FROM vendors WHERE outlet_id = $1 ORDER BY created_at, name`,
+    [outlet.id],
+  );
+  res.json(rows.map(vendorDto));
+}));
+
+app.post("/api/vendors", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can add a vendor.", 403);
+  }
+  const name = String(req.body?.name ?? "").trim();
+  const phone = String(req.body?.phone ?? "").trim();
+  const serviceType = String(req.body?.serviceType ?? "").trim();
+  const address = String(req.body?.address ?? "").trim();
+  if (!name) throw bad("Enter the vendor name.");
+  const { rows } = await pool.query(
+    `INSERT INTO vendors (outlet_id, name, phone, service_type, address)
+     VALUES ($1, $2, $3, $4, $5)
+     RETURNING id, name, phone, service_type, address`,
+    [outlet.id, name, phone, serviceType, address],
+  );
+  res.status(201).json(vendorDto(rows[0]));
 }));
 
 app.get("/api/bank-accounts", wrap(async (req, res) => {
