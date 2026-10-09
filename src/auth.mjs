@@ -9,6 +9,7 @@ const LOGIN_ROLES = [
   "credit_customer",
   "auditor",
   "accounts_auditor",
+  "attendance",
 ];
 
 export function signToken(user) {
@@ -76,6 +77,7 @@ export async function outletIdsFor(pool, user) {
     const { rows } = await pool.query(`SELECT id FROM outlets ORDER BY name`);
     return rows.map((row) => row.id);
   }
+  if (user.role === "attendance") return [];
   if (!user.outlet_id || user.role === "owner" || user.role === "auditor" || user.role === "accounts_auditor") {
     const { rows } = await pool.query(
       `SELECT id FROM outlets WHERE settings_id = $1 ORDER BY name`,

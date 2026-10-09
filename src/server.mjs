@@ -6,7 +6,7 @@ import { migrate } from "../db/migrate.mjs";
 import { createPool } from "../db/pool.mjs";
 import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./auth.mjs";
 import { ensureDemo } from "./demo.mjs";
-import { ensureSeed, ensureSuperAdmin } from "./seed.mjs";
+import { ensureAttendanceUser, ensureSeed, ensureSuperAdmin } from "./seed.mjs";
 import { promoteDueShifts } from "./shift-entry.mjs";
 import { registerWrites } from "./writes.mjs";
 
@@ -647,7 +647,7 @@ app.post("/api/dealers", wrap(async (req, res) => {
   }
 }));
 
-const DIRECTORY_ROLES = ["owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor", "supplier", "bank", "provider"];
+const DIRECTORY_ROLES = ["owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor", "supplier", "bank", "provider", "attendance"];
 
 app.post("/api/admin/outlets", wrap(async (req, res) => {
   requireSuper(req.user);
@@ -692,6 +692,17 @@ app.post("/api/admin/outlets", wrap(async (req, res) => {
   }
 }));
 
+app.get("/api/admin/users", wrap(async (req, res) => {
+  requireSuper(req.user);
+  const { rows } = await pool.query(
+    `SELECT u.*, '{}'::uuid[] AS outlet_ids
+     FROM users u
+     WHERE u.role = 'attendance'
+     ORDER BY u.name`,
+  );
+  res.json(rows.map((row) => partyDto(row)));
+}));
+
 app.post("/api/admin/users", wrap(async (req, res) => {
   requireSuper(req.user);
   const name = String(req.body?.name ?? "").trim();
@@ -710,6 +721,7 @@ app.post("/api/admin/users", wrap(async (req, res) => {
   if (role === "owner") designation = "Dealer";
   else if (role === "credit_customer") designation = "Credit customer";
   else if (role === "accounts_auditor") designation = "Accounts auditor";
+  else if (role === "attendance") designation = "Attendance";
   else designation = role.slice(0, 1).toUpperCase() + role.slice(1);
   const taken = await pool.query(
     `SELECT id FROM users
@@ -720,6 +732,22 @@ app.post("/api/admin/users", wrap(async (req, res) => {
   );
   if (taken.rows.length) throw bad("That mobile is already in use.");
   const hash = await bcrypt.hash(password, 10);
+  if (role === "attendance") {
+    const user = await pool.query(
+      `INSERT INTO users (
+         settings_id, outlet_id, role, staff_type, name, phone, email, password_hash, designation, active
+       ) VALUES (NULL, NULL, 'attendance', NULL, $1, $2, $3, $4, $5, true)
+       RETURNING id`,
+      [name, phone, email || null, hash, designation],
+    );
+    await pool.query(
+      `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+       VALUES (NULL, $1, 'created', $2, 'users', $3)`,
+      [req.user.id, `${designation} ${name}`, user.rows[0].id],
+    );
+    res.status(201).json({ id: user.rows[0].id, outletId: null });
+    return;
+  }
   const requestedOutlet = String(req.body?.outletId ?? "").trim();
   const outletBody = req.body?.outlet && typeof req.body.outlet === "object" ? req.body.outlet : {};
   const client = await pool.connect();
@@ -1691,6 +1719,8 @@ const seed = await ensureSeed(pool);
 if (seed.seeded) console.log("Seeded one dealer and two outlets.");
 const superAdmin = await ensureSuperAdmin(pool);
 if (superAdmin.seeded) console.log("Seeded super admin.");
+const attendanceUser = await ensureAttendanceUser(pool);
+if (attendanceUser.seeded) console.log("Seeded attendance user.");
 const demo = await ensureDemo(pool);
 if (demo.seeded) console.log("Loaded desk data for both outlets.");
 

@@ -513,7 +513,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
          WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
            AND active = true
            AND role = ANY($2::user_role[])`,
-        [digits, ["super_admin", "owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor"]],
+        [digits, ["super_admin", "owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor", "attendance"]],
       );
       if (taken.rows.length) throw bad("That mobile is already in use.");
       passwordHash = await bcrypt.hash(password, 10);

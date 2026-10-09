@@ -25,7 +25,8 @@ DO $$ BEGIN
     'supplier',
     'bank',
     'provider',
-    'super_admin'
+    'super_admin',
+    'attendance'
   );
 EXCEPTION WHEN duplicate_object THEN NULL;
 END $$;

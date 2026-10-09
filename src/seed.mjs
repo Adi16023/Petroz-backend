@@ -55,3 +55,20 @@ export async function ensureSuperAdmin(pool) {
   );
   return { seeded: true };
 }
+
+export async function ensureAttendanceUser(pool) {
+  const existing = await pool.query(`SELECT id FROM users WHERE role = 'attendance' LIMIT 1`);
+  if (existing.rows.length) return { seeded: false };
+
+  const phone = process.env.SEED_ATTENDANCE_PHONE || "9800011420";
+  const password = process.env.SEED_ATTENDANCE_PASSWORD || "1142";
+  const name = process.env.SEED_ATTENDANCE_NAME || "Attendance";
+  const passwordHash = await bcrypt.hash(password, 10);
+  await pool.query(
+    `INSERT INTO users (
+       settings_id, outlet_id, role, name, phone, email, password_hash, designation, active
+     ) VALUES (NULL, NULL, 'attendance', $1, $2, $3, $4, 'Attendance', true)`,
+    [name, phone, "attendance@petroz.in", passwordHash],
+  );
+  return { seeded: true };
+}
