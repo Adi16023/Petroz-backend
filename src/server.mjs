@@ -7,6 +7,7 @@ import { createPool } from "../db/pool.mjs";
 import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./auth.mjs";
 import { ensureDemo } from "./demo.mjs";
 import { ensureSeed, ensureSuperAdmin } from "./seed.mjs";
+import { promoteDueShifts } from "./shift-entry.mjs";
 import { registerWrites } from "./writes.mjs";
 
 const DOCUMENT_KINDS = [
@@ -925,6 +926,7 @@ app.get("/api/notifications", wrap(async (req, res) => {
 
 app.get("/api/dashboard", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  await promoteDueShifts(pool, outlet.id);
   const openResult = await pool.query(
     `SELECT * FROM shifts WHERE outlet_id = $1 AND status = 'open' ORDER BY starts_at DESC LIMIT 1`,
     [outlet.id],
@@ -1007,6 +1009,7 @@ app.get("/api/dashboard", wrap(async (req, res) => {
 
 app.get("/api/dsr", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  await promoteDueShifts(pool, outlet.id);
   const date = req.query.date || new Date().toISOString().slice(0, 10);
   const docs = await pool.query(
     `SELECT d.kind::text AS kind, d.net, d.mode::text AS mode, d.category, d.status, pr.kind AS product_kind
@@ -1075,6 +1078,7 @@ app.get("/api/dsr", wrap(async (req, res) => {
 
 app.get("/api/shifts", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  await promoteDueShifts(pool, outlet.id);
   const status = req.query.status;
   if (status && !["upcoming", "open", "closed"].includes(status)) {
     throw bad("Unknown shift status.");
@@ -1090,9 +1094,14 @@ app.get("/api/shifts", wrap(async (req, res) => {
 
 app.get("/api/shifts/:id", wrap(async (req, res) => {
   const { rows } = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [req.params.id]);
-  const shift = rows[0];
+  let shift = rows[0];
   if (!shift) throw bad("Shift not found.", 404);
   await assertOutlet(pool, req.user, shift.outlet_id);
+  if (shift.status === "upcoming") {
+    await promoteDueShifts(pool, shift.outlet_id);
+    const fresh = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [shift.id]);
+    shift = fresh.rows[0] ?? shift;
+  }
   const dutyRows = Array.isArray(shift.duties) ? shift.duties : [];
   const dutyUserIds = [...new Set(dutyRows.map((duty) => duty.userId).filter(Boolean))];
   const dutyNozzleIds = [...new Set(dutyRows.map((duty) => duty.nozzleId).filter(Boolean))];

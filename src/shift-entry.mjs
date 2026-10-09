@@ -227,12 +227,29 @@ async function ensureTempCustomer(client, outletId, row) {
   return inserted.rows[0].id;
 }
 
+/** Upcoming shifts open once the current instant reaches starts_at. That instant is the IST start the dealer picked. */
+export async function promoteDueShifts(pool, outletId) {
+  await pool.query(
+    `UPDATE shifts
+     SET status = 'open'
+     WHERE status = 'upcoming'
+       AND starts_at <= now()
+       AND ($1::uuid IS NULL OR outlet_id = $1)`,
+    [outletId ?? null],
+  );
+}
+
 export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, money, round2, payMode }) {
   async function loadShift(req, shiftId) {
     const found = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [shiftId]);
-    const shift = found.rows[0];
+    let shift = found.rows[0];
     if (!shift) throw bad("Shift not found.", 404);
     const outlet = await assertOutlet(pool, req.user, shift.outlet_id);
+    if (shift.status === "upcoming") {
+      await promoteDueShifts(pool, shift.outlet_id);
+      const fresh = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [shiftId]);
+      shift = fresh.rows[0] ?? shift;
+    }
     return { shift, outlet };
   }
 
@@ -805,7 +822,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       if (posted) {
         await client.query(
           `UPDATE shifts
-           SET entry = $2::jsonb, status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4, $5)
+           SET entry = $2::jsonb, status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4::uuid, $5::uuid)
            WHERE id = $1`,
           [shift.id, JSON.stringify(entry), expected, shift.status === "closed" ? shift.closed_by : null, req.user.id],
         );
