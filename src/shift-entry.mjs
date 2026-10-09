@@ -348,8 +348,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
 
   app.put("/api/shifts/:id/entry", wrap(async (req, res) => {
     const { shift, outlet } = await loadShift(req, req.params.id);
-    if (shift.status === "closed") throw bad("This shift is already closed.");
     const submit = Boolean(req.body?.submit);
+    const posted = submit || shift.status === "closed";
     const pumps = Array.isArray(req.body?.pumps) ? req.body.pumps : [];
     const meters = {};
     for (const row of pumps) {
@@ -365,9 +365,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const payments = Array.isArray(req.body?.payments) ? req.body.payments : [];
     const expenses = Array.isArray(req.body?.expenses) ? req.body.expenses : [];
     const adjustment = req.body?.adjustment && typeof req.body.adjustment === "object" ? req.body.adjustment : null;
-    const saleStatus = submit ? "paid" : "draft";
-    const docStatus = submit ? "approved" : "draft";
-    const expenseStatus = req.user.role === "staff" ? "pending" : submit ? "approved" : "draft";
+    const saleStatus = posted ? "paid" : "draft";
+    const docStatus = posted ? "approved" : "draft";
+    const expenseStatus = posted ? "approved" : req.user.role === "staff" ? "pending" : "draft";
     const docDate = shiftDay(shift.starts_at);
     const nozzleIds = pumps.map((row) => uuidOrNull(row.equipmentId)).filter(Boolean);
 
@@ -559,12 +559,12 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       }
 
       const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust);
-      if (submit) {
+      if (posted) {
         await client.query(
           `UPDATE shifts
-           SET entry = $2::jsonb, status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = $4
+           SET entry = $2::jsonb, status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4, $5)
            WHERE id = $1`,
-          [shift.id, JSON.stringify(entry), expected, req.user.id],
+          [shift.id, JSON.stringify(entry), expected, shift.status === "closed" ? shift.closed_by : null, req.user.id],
         );
       } else {
         await client.query(`UPDATE shifts SET entry = $2::jsonb WHERE id = $1`, [shift.id, JSON.stringify(entry)]);
