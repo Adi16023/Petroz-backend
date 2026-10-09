@@ -413,6 +413,28 @@ app.post("/api/vendors", wrap(async (req, res) => {
   res.status(201).json(vendorDto(rows[0]));
 }));
 
+app.patch("/api/vendors/:id", wrap(async (req, res) => {
+  const { rows: found } = await pool.query(`SELECT outlet_id FROM vendors WHERE id = $1`, [req.params.id]);
+  if (!found[0]) throw bad("Vendor not found.", 404);
+  const outlet = await assertOutlet(pool, req.user, found[0].outlet_id);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can edit a vendor.", 403);
+  }
+  const name = String(req.body?.name ?? "").trim();
+  const phone = String(req.body?.phone ?? "").trim();
+  const serviceType = String(req.body?.serviceType ?? "").trim();
+  const address = String(req.body?.address ?? "").trim();
+  if (!name) throw bad("Enter the vendor name.");
+  const { rows } = await pool.query(
+    `UPDATE vendors
+     SET name = $2, phone = $3, service_type = $4, address = $5
+     WHERE id = $1 AND outlet_id = $6
+     RETURNING id, name, phone, service_type, address`,
+    [req.params.id, name, phone, serviceType, address, outlet.id],
+  );
+  res.json(vendorDto(rows[0]));
+}));
+
 app.get("/api/bank-accounts", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const { rows } = await pool.query(
