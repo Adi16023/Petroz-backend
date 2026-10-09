@@ -123,7 +123,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
   async function bundle(shift, settingsId) {
     const outletId = shift.outlet_id;
     const duties = Array.isArray(shift.duties) ? shift.duties : [];
-    const [nozzles, readings, previous, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent] = await Promise.all([
+    const [nozzles, readings, previous, priorShiftOpen, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent] = await Promise.all([
       pool.query(
         `SELECT e.id, e.label, e.meter, e.product_id, pr.name AS product_name, pr.unit, pr.selling_price
          FROM equipment e
@@ -150,6 +150,18 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
            )
          ORDER BY equipment_id, at DESC`,
         [outletId, shift.starts_at],
+      ),
+      pool.query(
+        `SELECT r.equipment_id, r.qty
+         FROM dip_readings r
+         WHERE r.kind = 'opening'
+           AND r.shift_id = (
+             SELECT id FROM shifts
+             WHERE outlet_id = $1 AND id <> $2 AND starts_at < $3
+             ORDER BY starts_at DESC
+             LIMIT 1
+           )`,
+        [outletId, shift.id, shift.starts_at],
       ),
       pool.query(
         `SELECT l.equipment_id, l.qty, l.rate, l.test_qty
@@ -231,6 +243,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       : {};
     const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(row.qty)]));
     const prev = new Map(previous.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
+    const priorOpen = new Map(priorShiftOpen.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const fuelByNozzle = new Map(fuel.rows.map((row) => [row.equipment_id, row]));
     const recentByNozzle = new Map();
     for (const row of recent.rows) {
@@ -262,19 +275,23 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       })),
       nozzles: nozzles.rows.map((row) => {
         const savedOpen = opening.has(row.id);
-        const openQty = savedOpen ? opening.get(row.id) ?? 0 : prev.get(row.id) ?? 0;
+        const fromPrior = priorOpen.has(row.id) ? priorOpen.get(row.id) ?? 0 : null;
+        const baseline = fromPrior != null ? fromPrior : prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const line = fuelByNozzle.get(row.id);
-        const baseline = prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const savedPrevious = savedMeters[row.id];
-        const previousReading = savedPrevious == null || savedPrevious === "" ? baseline : num(savedPrevious) ?? baseline;
+        const savedPrevNum = savedPrevious == null || savedPrevious === "" ? null : num(savedPrevious);
+        const savedOpenQty = savedOpen ? opening.get(row.id) ?? 0 : null;
+        const untouched = savedOpenQty == null || (savedPrevNum != null && savedPrevNum === savedOpenQty);
+        const previousReading = fromPrior != null && (savedPrevNum == null || untouched) ? fromPrior : savedPrevNum ?? baseline;
+        const openQty = untouched && fromPrior != null ? fromPrior : savedOpenQty ?? previousReading;
         const sold = round2(openQty - previousReading);
         return {
           id: row.id,
           label: row.label,
           fuel: row.product_name || "Fuel",
           unit: row.unit || "L",
-          previous: savedPrevious == null || savedPrevious === "" ? baseline : num(savedPrevious) ?? baseline,
-          opening: savedOpen ? openQty : (prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0),
+          previous: previousReading,
+          opening: openQty,
           qty: sold ?? 0,
           test: num(line?.test_qty) ?? 0,
           rate: num(line?.rate) ?? num(row.selling_price) ?? 0,
