@@ -288,6 +288,160 @@ app.get("/api/pay-modes", wrap(async (_req, res) => {
   res.json(rows.map((row) => ({ id: row.id, name: row.id })));
 }));
 
+function methodCode(name, taken) {
+  const raw = String(name ?? "").trim().toLowerCase();
+  if (raw === "fleet card") return taken.has("fleet") ? "" : "fleet";
+  let base = raw.replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 24);
+  if (!base) base = "method";
+  if (!/^[a-z]/.test(base)) base = `m_${base}`.slice(0, 24);
+  let code = base;
+  let n = 2;
+  while (taken.has(code)) code = `${base.slice(0, 20)}_${n++}`;
+  return code;
+}
+
+function paymentDto(row) {
+  return { id: row.id, code: row.code, name: row.name, active: row.active, sort: row.sort };
+}
+
+function bankDto(row) {
+  return {
+    id: row.id,
+    bankName: row.bank_name,
+    accountNumber: row.account_number,
+    accountType: row.account_type,
+    ifsc: row.ifsc,
+    holderName: row.holder_name,
+  };
+}
+
+async function ensurePaymentMethods(outletId) {
+  await pool.query(
+    `INSERT INTO payment_methods (outlet_id, code, name, active, sort)
+     SELECT $1, v.code, v.name, true, v.sort
+     FROM (VALUES
+       ('cash', 'Cash', 1),
+       ('credit', 'Credit', 2),
+       ('upi', 'UPI', 3),
+       ('card', 'Card', 4),
+       ('fleet', 'Fleet Card', 5)
+     ) AS v(code, name, sort)
+     ON CONFLICT (outlet_id, code) DO NOTHING`,
+    [outletId],
+  );
+  const { rows } = await pool.query(
+    `SELECT id, code, name, active, sort FROM payment_methods WHERE outlet_id = $1 ORDER BY sort, name`,
+    [outletId],
+  );
+  return rows;
+}
+
+app.get("/api/payment-methods", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  const rows = await ensurePaymentMethods(outlet.id);
+  res.json(rows.map(paymentDto));
+}));
+
+app.put("/api/payment-methods", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can change payment methods.", 403);
+  }
+  const incoming = Array.isArray(req.body?.methods) ? req.body.methods : null;
+  if (!incoming) throw bad("Send the payment methods.");
+  const existing = await ensurePaymentMethods(outlet.id);
+  const byId = new Map(existing.map((row) => [row.id, row]));
+  const taken = new Set(existing.map((row) => row.code));
+  for (const item of incoming) {
+    const name = String(item?.name ?? "").trim();
+    if (!name) throw bad("Each payment method needs a name.");
+    const active = item?.active !== false;
+    const current = byId.get(item?.id);
+    if (current) {
+      await pool.query(`UPDATE payment_methods SET name = $2, active = $3 WHERE id = $1 AND outlet_id = $4`, [current.id, name, active, outlet.id]);
+      continue;
+    }
+    const code = methodCode(name, taken);
+    if (!code || taken.has(code)) throw bad("That payment method is already on this outlet.");
+    taken.add(code);
+    const sort = existing.length + taken.size;
+    await pool.query(
+      `INSERT INTO payment_methods (outlet_id, code, name, active, sort) VALUES ($1, $2, $3, $4, $5)`,
+      [outlet.id, code, name, active, sort],
+    );
+  }
+  const rows = await ensurePaymentMethods(outlet.id);
+  res.json(rows.map(paymentDto));
+}));
+
+app.get("/api/bank-accounts", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  const { rows } = await pool.query(
+    `SELECT id, bank_name, account_number, account_type, ifsc, holder_name
+     FROM bank_accounts WHERE outlet_id = $1 ORDER BY created_at, bank_name`,
+    [outlet.id],
+  );
+  res.json(rows.map(bankDto));
+}));
+
+app.post("/api/bank-accounts", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can add a bank account.", 403);
+  }
+  const bankName = String(req.body?.bankName ?? "").trim();
+  const accountNumber = String(req.body?.accountNumber ?? "").trim();
+  const accountType = String(req.body?.accountType ?? "").trim();
+  const ifsc = String(req.body?.ifsc ?? "").trim().toUpperCase();
+  const holderName = String(req.body?.holderName ?? "").trim();
+  if (!bankName) throw bad("Enter the bank name.");
+  if (!accountNumber) throw bad("Enter the account number.");
+  if (!holderName) throw bad("Enter the account holder name.");
+  const { rows } = await pool.query(
+    `INSERT INTO bank_accounts (outlet_id, bank_name, account_number, account_type, ifsc, holder_name)
+     VALUES ($1, $2, $3, $4, $5, $6)
+     RETURNING id, bank_name, account_number, account_type, ifsc, holder_name`,
+    [outlet.id, bankName, accountNumber, accountType, ifsc, holderName],
+  );
+  res.status(201).json(bankDto(rows[0]));
+}));
+
+app.patch("/api/bank-accounts/:id", wrap(async (req, res) => {
+  const { rows: found } = await pool.query(`SELECT outlet_id FROM bank_accounts WHERE id = $1`, [req.params.id]);
+  if (!found[0]) throw bad("Bank account not found.", 404);
+  const outlet = await assertOutlet(pool, req.user, found[0].outlet_id);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can edit a bank account.", 403);
+  }
+  const bankName = String(req.body?.bankName ?? "").trim();
+  const accountNumber = String(req.body?.accountNumber ?? "").trim();
+  const accountType = String(req.body?.accountType ?? "").trim();
+  const ifsc = String(req.body?.ifsc ?? "").trim().toUpperCase();
+  const holderName = String(req.body?.holderName ?? "").trim();
+  if (!bankName) throw bad("Enter the bank name.");
+  if (!accountNumber) throw bad("Enter the account number.");
+  if (!holderName) throw bad("Enter the account holder name.");
+  const { rows } = await pool.query(
+    `UPDATE bank_accounts
+     SET bank_name = $2, account_number = $3, account_type = $4, ifsc = $5, holder_name = $6
+     WHERE id = $1 AND outlet_id = $7
+     RETURNING id, bank_name, account_number, account_type, ifsc, holder_name`,
+    [req.params.id, bankName, accountNumber, accountType, ifsc, holderName, outlet.id],
+  );
+  res.json(bankDto(rows[0]));
+}));
+
+app.delete("/api/bank-accounts/:id", wrap(async (req, res) => {
+  const { rows: found } = await pool.query(`SELECT outlet_id FROM bank_accounts WHERE id = $1`, [req.params.id]);
+  if (!found[0]) throw bad("Bank account not found.", 404);
+  const outlet = await assertOutlet(pool, req.user, found[0].outlet_id);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can remove a bank account.", 403);
+  }
+  await pool.query(`DELETE FROM bank_accounts WHERE id = $1 AND outlet_id = $2`, [req.params.id, outlet.id]);
+  res.json({ ok: true });
+}));
+
 app.get("/api/outlets", wrap(async (req, res) => {
   const ids = await outletIdsFor(pool, req.user);
   const { rows } = await pool.query(
@@ -377,6 +531,7 @@ app.post("/api/dealers", wrap(async (req, res) => {
       [outlet.rows[0].id, req.user.id, `Dealer ${name}`, user.rows[0].id],
     );
     await client.query("COMMIT");
+    await ensurePaymentMethods(outlet.rows[0].id);
     res.status(201).json({ id: user.rows[0].id, outletId: outlet.rows[0].id });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -420,6 +575,7 @@ app.post("/api/admin/outlets", wrap(async (req, res) => {
       [created.rows[0].id, req.user.id, name],
     );
     await client.query("COMMIT");
+    await ensurePaymentMethods(created.rows[0].id);
     res.status(201).json({ id: created.rows[0].id, name: created.rows[0].name });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -509,6 +665,7 @@ app.post("/api/admin/users", wrap(async (req, res) => {
       [linkedOutletId, req.user.id, `${designation} ${name}`, user.rows[0].id],
     );
     await client.query("COMMIT");
+    await ensurePaymentMethods(linkedOutletId);
     res.status(201).json({ id: user.rows[0].id, outletId: linkedOutletId });
   } catch (error) {
     await client.query("ROLLBACK");
@@ -1207,8 +1364,7 @@ app.get("/api/documents", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const kinds = req.query.kind ? String(req.query.kind).split(",").map((item) => item.trim()).filter(Boolean) : null;
   if (kinds?.some((kind) => !DOCUMENT_KINDS.includes(kind))) throw bad("Unknown document kind.");
-  const modes = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
-  if (req.query.mode && !modes.includes(req.query.mode)) throw bad("Unknown payment mode.");
+  if (req.query.mode && !/^[a-z0-9_]+$/i.test(String(req.query.mode))) throw bad("Unknown payment mode.");
   const documentKinds = picked(kinds, ["quote", "order", "payment", "receipt", "salary", "adjustment", "dsr"]);
   const purchaseKinds = picked(kinds, ["purchase", "purchase_order"]);
   const expenseKinds = picked(kinds, ["expense", "expense_schedule"]);
@@ -1238,7 +1394,7 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($5::date IS NULL OR d.doc_date >= $5::date)
              AND ($6::date IS NULL OR d.doc_date <= $6::date)
              AND ($7::text IS NULL OR d.category = $7)
-             AND ($8::pay_mode IS NULL OR d.mode = $8::pay_mode)
+             AND ($8::text IS NULL OR d.mode = $8::text)
            GROUP BY d.id, u.name`,
           [outlet.id, documentKinds, ...filters],
         )
@@ -1252,7 +1408,7 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($4::date IS NULL OR s.doc_date >= $4::date)
              AND ($5::date IS NULL OR s.doc_date <= $5::date)
              AND ($6::text IS NULL OR s.category = $6)
-             AND ($7::pay_mode IS NULL OR s.mode = $7::pay_mode)
+             AND ($7::text IS NULL OR s.mode = $7::text)
            GROUP BY s.id, u.name`,
           [outlet.id, ...filters],
         )
@@ -1267,7 +1423,7 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($5::date IS NULL OR p.doc_date >= $5::date)
              AND ($6::date IS NULL OR p.doc_date <= $6::date)
              AND ($7::text IS NULL OR p.category = $7)
-             AND ($8::pay_mode IS NULL OR p.mode = $8::pay_mode)
+             AND ($8::text IS NULL OR p.mode = $8::text)
            GROUP BY p.id, u.name`,
           [outlet.id, purchaseKinds, ...filters],
         )
@@ -1282,7 +1438,7 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($5::date IS NULL OR e.doc_date >= $5::date)
              AND ($6::date IS NULL OR e.doc_date <= $6::date)
              AND ($7::text IS NULL OR e.category = $7)
-             AND ($8::pay_mode IS NULL OR e.mode = $8::pay_mode)`,
+             AND ($8::text IS NULL OR e.mode = $8::text)`,
           [outlet.id, expenseKinds, ...filters],
         )
       : Promise.resolve({ rows: [] }),
@@ -1296,7 +1452,7 @@ app.get("/api/documents", wrap(async (req, res) => {
              AND ($5::date IS NULL OR b.doc_date >= $5::date)
              AND ($6::date IS NULL OR b.doc_date <= $6::date)
              AND ($7::text IS NULL OR b.category = $7)
-             AND ($8::pay_mode IS NULL OR b.mode = $8::pay_mode)`,
+             AND ($8::text IS NULL OR b.mode = $8::text)`,
           [outlet.id, bankingKinds, ...filters],
         )
       : Promise.resolve({ rows: [] }),

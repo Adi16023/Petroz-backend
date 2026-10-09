@@ -50,15 +50,19 @@ function round2(value) {
 function payMode(value) {
   const v = String(value ?? "").trim().toLowerCase();
   if (!v) return null;
-  if (v.includes("upi")) return "upi";
-  if (v.includes("card")) return "card";
-  if (v.includes("credit")) return "credit";
+  if (v === "fleet" || v === "fleet card" || v === "fleet_card") return "fleet";
+  if (/^[a-z][a-z0-9_]{0,31}$/.test(v)) return v;
+  if (v === "upi" || v.includes("upi")) return "upi";
+  if (v === "card" || (v.includes("card") && !v.includes("fleet"))) return "card";
+  if (v === "credit" || v.includes("credit")) return "credit";
   if (v.includes("neft")) return "neft";
   if (v.includes("rtgs")) return "rtgs";
   if (v.includes("imps")) return "imps";
   if (v.includes("cheque")) return "cheque";
-  if (v.includes("bank")) return "bank";
+  if (v === "bank" || v.includes("bank")) return "bank";
   if (PAY_MODES.includes(v)) return v;
+  const slug = v.replace(/[^a-z0-9]+/g, "_").replace(/^_|_$/g, "").slice(0, 32);
+  if (/^[a-z][a-z0-9_]{0,31}$/.test(slug)) return slug;
   return "cash";
 }
 
@@ -1160,8 +1164,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   app.post("/api/billing", wrap(async (req, res) => {
     const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
     const lines = billLines(req.body);
-    const modes = ["Cash", "UPI", "Card", "Credit"];
-    const paymentMode = modes.includes(req.body?.paymentMode) ? req.body.paymentMode : "Cash";
+    const wanted = String(req.body?.paymentMode ?? "").trim();
+    const { rows: methodRows } = await pool.query(
+      `SELECT code, name, active FROM payment_methods WHERE outlet_id = $1`,
+      [outlet.id],
+    );
+    const match = methodRows.find((row) => row.active && (row.code === wanted || row.name === wanted));
+    const paymentMode = match?.name || wanted || "Cash";
     const billedAt = req.body?.billedAt ? new Date(req.body.billedAt) : new Date();
     if (Number.isNaN(billedAt.getTime())) throw bad("Pick a date and time.");
     const total = round2(lines.reduce((sum, line) => sum + line.amount, 0));

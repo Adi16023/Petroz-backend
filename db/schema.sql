@@ -588,3 +588,50 @@ CREATE TABLE IF NOT EXISTS billing (
 );
 
 CREATE INDEX IF NOT EXISTS billing_outlet_idx ON billing (outlet_id, billed_at DESC);
+
+CREATE TABLE IF NOT EXISTS payment_methods (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,
+  code text NOT NULL,
+  name text NOT NULL,
+  active boolean NOT NULL DEFAULT true,
+  sort integer NOT NULL DEFAULT 0,
+  UNIQUE (outlet_id, code)
+);
+
+CREATE TABLE IF NOT EXISTS bank_accounts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,
+  bank_name text NOT NULL,
+  account_number text NOT NULL,
+  account_type text NOT NULL DEFAULT '',
+  ifsc text NOT NULL DEFAULT '',
+  holder_name text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+INSERT INTO payment_methods (outlet_id, code, name, active, sort)
+SELECT o.id, v.code, v.name, true, v.sort
+FROM outlets o
+CROSS JOIN (
+  VALUES
+    ('cash', 'Cash', 1),
+    ('credit', 'Credit', 2),
+    ('upi', 'UPI', 3),
+    ('card', 'Card', 4),
+    ('fleet', 'Fleet Card', 5)
+) AS v(code, name, sort)
+ON CONFLICT (outlet_id, code) DO NOTHING;
+
+DO $$
+DECLARE
+  rec record;
+BEGIN
+  FOR rec IN
+    SELECT table_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public' AND column_name = 'mode' AND udt_name = 'pay_mode'
+  LOOP
+    EXECUTE format('ALTER TABLE %I ALTER COLUMN mode TYPE text USING mode::text', rec.table_name);
+  END LOOP;
+END $$;
