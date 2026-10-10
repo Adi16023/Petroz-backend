@@ -54,22 +54,25 @@ export async function login(pool, phone, password) {
     `SELECT * FROM users
      WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
        AND role = ANY($2::user_role[])
-       AND active = true`,
+       AND active = true
+     ORDER BY CASE role
+       WHEN 'super_admin' THEN 0
+       WHEN 'owner' THEN 1
+       WHEN 'manager' THEN 2
+       WHEN 'attendance' THEN 3
+       WHEN 'staff' THEN 4
+       ELSE 5
+     END`,
     [digits, LOGIN_ROLES],
   );
-  const user = rows[0];
-  if (!user?.password_hash) {
-    const error = new Error("Phone or password is wrong.");
-    error.status = 401;
-    throw error;
+  for (const user of rows) {
+    if (!user.password_hash) continue;
+    const ok = await bcrypt.compare(String(password), user.password_hash);
+    if (ok) return user;
   }
-  const ok = await bcrypt.compare(String(password), user.password_hash);
-  if (!ok) {
-    const error = new Error("Phone or password is wrong.");
-    error.status = 401;
-    throw error;
-  }
-  return user;
+  const error = new Error("Phone or password is wrong.");
+  error.status = 401;
+  throw error;
 }
 
 export async function outletIdsFor(pool, user) {
