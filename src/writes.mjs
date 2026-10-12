@@ -450,6 +450,30 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         res.json({ id: row.id, status: status ?? null });
         return;
       }
+      if (table === "expenses") {
+        const sets = [];
+        const params = [row.id];
+        const put = (column, value) => {
+          params.push(value);
+          sets.push(`${column} = $${params.length}`);
+        };
+        if (req.body?.amount != null && req.body.amount !== "") {
+          const total = money(req.body.amount);
+          put("amount", total);
+          put("net", total);
+        }
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "note")) put("note", String(req.body.note ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "mode")) put("mode", payMode(req.body.mode));
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "category")) put("category", String(req.body.category ?? "").trim() || null);
+        if (status) {
+          put("status", status);
+          put("decided_by", req.user.id);
+        }
+        if (sets.length) await pool.query(`UPDATE expenses SET ${sets.join(", ")} WHERE id = $1`, params);
+        await log(req.user, row.outlet_id, "updated", `expenses ${status ?? "edited"}`, table, row.id);
+        res.json({ id: row.id, status: status ?? null });
+        return;
+      }
       if (status) {
         const decided = table === "expenses" || table === "purchases" ? ", decided_by = $3" : "";
         await pool.query(
