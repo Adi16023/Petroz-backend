@@ -474,6 +474,26 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         res.json({ id: row.id, status: status ?? null });
         return;
       }
+      if (table === "banking") {
+        const sets = [];
+        const params = [row.id];
+        const put = (column, value) => {
+          params.push(value);
+          sets.push(`${column} = $${params.length}`);
+        };
+        if (req.body?.amount != null && req.body.amount !== "") put("amount", money(req.body.amount));
+        if (req.body?.charges != null && req.body.charges !== "") put("charges", money(req.body.charges));
+        if (req.body?.net != null && req.body.net !== "") put("net", money(req.body.net));
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "note")) put("note", String(req.body.note ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "reference")) put("reference", String(req.body.reference ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "docNo")) put("doc_no", String(req.body.docNo ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "mode")) put("mode", payMode(req.body.mode));
+        if (status) put("status", status);
+        if (sets.length) await pool.query(`UPDATE banking SET ${sets.join(", ")} WHERE id = $1`, params);
+        await log(req.user, row.outlet_id, "updated", `banking ${status ?? "edited"}`, table, row.id);
+        res.json({ id: row.id, status: status ?? null });
+        return;
+      }
       if (status) {
         const decided = table === "expenses" || table === "purchases" ? ", decided_by = $3" : "";
         await pool.query(
