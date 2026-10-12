@@ -1010,16 +1010,26 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     res.json({ id: row.id });
   }));
 
+  function punchAt(value) {
+    if (value == null || value === "") return new Date();
+    const ms = Date.parse(value);
+    if (!Number.isFinite(ms)) throw bad("Enter a valid date and time.");
+    if (ms > Date.now() + 2 * 60 * 1000) throw bad("Date and time cannot be in the future.");
+    return new Date(ms);
+  }
+
   app.post("/api/attendance", wrap(async (req, res) => {
     const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
     const party = req.body?.partyId || req.user.id;
+    const checkIn = punchAt(req.body?.at);
     const { rows } = await pool.query(
       `INSERT INTO attendance (user_id, outlet_id, check_in, gps_ok, geofence_ok, selfie, spoof, device, manual_by)
-       VALUES ($1, $2, now(), $3, $4, $5, false, $6, $7)
+       VALUES ($1, $2, $3, $4, $5, $6, false, $7, $8)
        RETURNING id`,
       [
         party,
         outlet.id,
+        checkIn.toISOString(),
         req.body?.manual ? false : true,
         true,
         req.body?.manual ? false : true,
@@ -1032,11 +1042,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   }));
 
   app.patch("/api/attendance/:id", wrap(async (req, res) => {
-    const found = await pool.query(`SELECT id, outlet_id, user_id FROM attendance WHERE id = $1`, [req.params.id]);
+    const found = await pool.query(`SELECT id, outlet_id, user_id, check_in FROM attendance WHERE id = $1`, [req.params.id]);
     const row = found.rows[0];
     if (!row) throw bad("Attendance not found.", 404);
     await assertOutlet(pool, req.user, row.outlet_id);
-    await pool.query(`UPDATE attendance SET check_out = now() WHERE id = $1 AND check_out IS NULL`, [row.id]);
+    const checkOut = punchAt(req.body?.at);
+    if (checkOut.getTime() <= new Date(row.check_in).getTime()) throw bad("Check out must be after check in.");
+    await pool.query(`UPDATE attendance SET check_out = $2 WHERE id = $1 AND check_out IS NULL`, [row.id, checkOut.toISOString()]);
     await log(req.user, row.outlet_id, "check-out", "Checked out", "attendance", row.id);
     res.json({ id: row.id });
   }));
