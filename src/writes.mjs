@@ -1046,12 +1046,27 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const row = found.rows[0];
     if (!row) throw bad("Attendance not found.", 404);
     await assertOutlet(pool, req.user, row.outlet_id);
+    if (req.body?.edit) {
+      const checkIn = punchAt(req.body?.checkIn);
+      const checkOut = req.body?.checkOut ? punchAt(req.body.checkOut) : null;
+      if (checkOut && checkOut.getTime() <= checkIn.getTime()) throw bad("Check out must be after check in.");
+      await pool.query(`UPDATE attendance SET check_in = $2, check_out = $3 WHERE id = $1`, [
+        row.id,
+        checkIn.toISOString(),
+        checkOut ? checkOut.toISOString() : null,
+      ]);
+      await log(req.user, row.outlet_id, "check-in", "Edited attendance", "attendance", row.id);
+      res.json({ id: row.id });
+      return;
+    }
     if (req.body?.checkIn) {
       const checkIn = punchAt(req.body?.at);
-      if (row.check_out && checkIn.getTime() >= new Date(row.check_out).getTime()) {
-        throw bad("Check in must be before check out.");
+      const checkOut = row.check_out ? new Date(row.check_out) : null;
+      if (checkOut && checkIn.getTime() >= checkOut.getTime()) {
+        await pool.query(`UPDATE attendance SET check_in = $2, check_out = NULL WHERE id = $1`, [row.id, checkIn.toISOString()]);
+      } else {
+        await pool.query(`UPDATE attendance SET check_in = $2 WHERE id = $1`, [row.id, checkIn.toISOString()]);
       }
-      await pool.query(`UPDATE attendance SET check_in = $2 WHERE id = $1`, [row.id, checkIn.toISOString()]);
       await log(req.user, row.outlet_id, "check-in", "Updated check-in time", "attendance", row.id);
       res.json({ id: row.id });
       return;
@@ -1060,6 +1075,16 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (checkOut.getTime() <= new Date(row.check_in).getTime()) throw bad("Check out must be after check in.");
     await pool.query(`UPDATE attendance SET check_out = $2 WHERE id = $1`, [row.id, checkOut.toISOString()]);
     await log(req.user, row.outlet_id, "check-out", row.check_out ? "Updated check-out time" : "Checked out", "attendance", row.id);
+    res.json({ id: row.id });
+  }));
+
+  app.delete("/api/attendance/:id", wrap(async (req, res) => {
+    const found = await pool.query(`SELECT id, outlet_id FROM attendance WHERE id = $1`, [req.params.id]);
+    const row = found.rows[0];
+    if (!row) throw bad("Attendance not found.", 404);
+    await assertOutlet(pool, req.user, row.outlet_id);
+    await pool.query(`DELETE FROM attendance WHERE id = $1`, [row.id]);
+    await log(req.user, row.outlet_id, "deleted", "Deleted attendance", "attendance", row.id);
     res.json({ id: row.id });
   }));
 
