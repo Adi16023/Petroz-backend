@@ -651,6 +651,22 @@ CROSS JOIN (
 ) AS v(code, name, sort)
 ON CONFLICT (outlet_id, code) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS queries (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  user_id uuid NOT NULL REFERENCES users (id),
+  category text NOT NULL,
+  detail text NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  reply text,
+  created_by uuid REFERENCES users (id),
+  decided_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (status IN ('open', 'addressed', 'clarified'))
+);
+
+CREATE INDEX IF NOT EXISTS queries_outlet_idx ON queries (outlet_id, created_at DESC);
+
 DO $$
 DECLARE
   rec record;

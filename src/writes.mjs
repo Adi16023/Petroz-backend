@@ -494,6 +494,31 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         res.json({ id: row.id, status: status ?? null });
         return;
       }
+      if (table === "documents" && Array.isArray(req.body?.lines)) {
+        const kindRow = await pool.query(`SELECT kind FROM documents WHERE id = $1`, [row.id]);
+        if (kindRow.rows[0]?.kind === "salary") {
+          if (!["owner", "manager", "super_admin"].includes(req.user.role)) throw bad("Only the dealer can edit payroll.", 403);
+          const amount = money(req.body?.amount);
+          const net = req.body?.net == null || req.body?.net === "" ? amount : money(req.body.net);
+          if (!(amount > 0)) throw bad("Enter basic pay.");
+          if (net < 0) throw bad("Deductions are higher than pay.");
+          await pool.query(
+            `UPDATE documents SET amount = $2, net = $3, note = COALESCE($4, note) WHERE id = $1`,
+            [row.id, net, net, String(req.body?.note ?? "").trim() || null],
+          );
+          await pool.query(`DELETE FROM document_items WHERE document_id = $1`, [row.id]);
+          for (const line of req.body.lines) {
+            await pool.query(
+              `INSERT INTO document_items (document_id, description, qty, rate, amount)
+               VALUES ($1, $2, $3, 0, $4)`,
+              [row.id, line.description ?? null, money(line.qty), money(line.amount)],
+            );
+          }
+          await log(req.user, row.outlet_id, "updated", "Edited payroll", "documents", row.id);
+          res.json({ id: row.id });
+          return;
+        }
+      }
       if (table === "sales" && Object.prototype.hasOwnProperty.call(req.body ?? {}, "docNo")) {
         const docNo = String(req.body.docNo ?? "").trim() || null;
         await pool.query(`UPDATE sales SET doc_no = $2 WHERE id = $1`, [row.id, docNo]);
@@ -537,6 +562,25 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       return;
     }
     throw bad("Document not found.", 404);
+  }));
+
+  app.post("/api/payroll/process", wrap(async (req, res) => {
+    if (!["owner", "manager", "super_admin"].includes(req.user.role)) throw bad("Only the dealer can process payroll.", 403);
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const ids = Array.isArray(req.body?.ids) ? req.body.ids.filter(Boolean) : [];
+    if (!ids.length) throw bad("Nothing to send.");
+    const { rows } = await pool.query(
+      `UPDATE documents
+       SET status = 'sent', decided_by = $2
+       WHERE outlet_id = $1
+         AND kind = 'salary'
+         AND status <> 'sent'
+         AND id = ANY($3::uuid[])
+       RETURNING id`,
+      [outlet.id, req.user.id, ids],
+    );
+    await log(req.user, outlet.id, "updated", `Sent ${rows.length} payroll${rows.length === 1 ? "" : "s"}`, "documents", rows[0]?.id ?? null);
+    res.json({ count: rows.length });
   }));
 
   app.post("/api/parties", wrap(async (req, res) => {
@@ -1075,6 +1119,95 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (checkOut.getTime() <= new Date(row.check_in).getTime()) throw bad("Check out must be after check in.");
     await pool.query(`UPDATE attendance SET check_out = $2 WHERE id = $1`, [row.id, checkOut.toISOString()]);
     await log(req.user, row.outlet_id, "check-out", row.check_out ? "Updated check-out time" : "Checked out", "attendance", row.id);
+    res.json({ id: row.id });
+  }));
+
+  const QUERY_CATEGORIES = [
+    "Missing check-in",
+    "Missing check-out",
+    "Wrong timing",
+    "Late mark",
+    "Leave",
+    "Shift",
+    "Payroll",
+    "Other",
+  ];
+
+  function queryDto(row) {
+    return {
+      id: row.id,
+      staffId: row.user_id,
+      staffName: row.party_name,
+      outletId: row.outlet_id,
+      category: row.category,
+      detail: row.detail,
+      status: row.status,
+      reply: row.reply,
+      createdBy: row.created_by,
+      createdByName: row.created_name,
+      createdAt: row.created_at,
+    };
+  }
+
+  app.get("/api/queries", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+    const { rows } = await pool.query(
+      `SELECT q.*, u.name AS party_name, c.name AS created_name
+       FROM queries q
+       JOIN users u ON u.id = q.user_id
+       LEFT JOIN users c ON c.id = q.created_by
+       WHERE q.outlet_id = $1
+       ORDER BY q.created_at DESC`,
+      [outlet.id],
+    );
+    res.json(rows.map(queryDto));
+  }));
+
+  app.post("/api/queries", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const category = String(req.body?.category ?? "").trim();
+    const detail = String(req.body?.detail ?? "").trim();
+    if (!QUERY_CATEGORIES.includes(category)) throw bad("Pick a category.");
+    if (!detail) throw bad("Enter the query.");
+    if (detail.length > 2000) throw bad("Query is too long.");
+    const found = await pool.query(
+      `SELECT id, role, outlet_id, settings_id, active FROM users WHERE id = $1`,
+      [req.body?.userId || null],
+    );
+    const person = found.rows[0];
+    if (!person || person.settings_id !== outlet.settings_id) throw bad("Pick an employee.");
+    if (!["staff", "manager"].includes(person.role)) throw bad("Pick an employee.");
+    if (person.outlet_id && person.outlet_id !== outlet.id) throw bad("That employee is on another outlet.");
+    if (person.active === false) throw bad("That employee is inactive.");
+    const dealer = ["owner", "manager", "super_admin"].includes(req.user.role);
+    if (!dealer && req.user.id !== person.id) throw bad("You can raise a query for yourself.");
+    const inserted = await pool.query(
+      `INSERT INTO queries (outlet_id, user_id, category, detail, status, created_by)
+       VALUES ($1, $2, $3, $4, 'open', $5)
+       RETURNING id`,
+      [outlet.id, person.id, category, detail, req.user.id],
+    );
+    await log(req.user, outlet.id, "query", category, "queries", inserted.rows[0].id);
+    res.status(201).json({ id: inserted.rows[0].id });
+  }));
+
+  app.patch("/api/queries/:id", wrap(async (req, res) => {
+    if (!["owner", "manager", "super_admin"].includes(req.user.role)) throw bad("Queries are closed by the bunk desk.", 403);
+    const status = req.body?.status;
+    if (status !== "addressed" && status !== "clarified") throw bad("Mark the query addressed or clarified.");
+    const reply = String(req.body?.reply ?? "").trim();
+    if (!reply) throw bad(status === "clarified" ? "Enter the clarification." : "Enter how this was addressed.");
+    if (reply.length > 2000) throw bad("Reply is too long.");
+    const found = await pool.query(`SELECT id, outlet_id, status FROM queries WHERE id = $1`, [req.params.id]);
+    const row = found.rows[0];
+    if (!row) throw bad("Query not found.", 404);
+    await assertOutlet(pool, req.user, row.outlet_id);
+    if (row.status !== "open") throw bad("This query is already closed.");
+    await pool.query(
+      `UPDATE queries SET status = $2, reply = $3, decided_by = $4 WHERE id = $1`,
+      [row.id, status, reply, req.user.id],
+    );
+    await log(req.user, row.outlet_id, "query", status === "clarified" ? "Clarified a query" : "Addressed a query", "queries", row.id);
     res.json({ id: row.id });
   }));
 
