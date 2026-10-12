@@ -1042,14 +1042,24 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   }));
 
   app.patch("/api/attendance/:id", wrap(async (req, res) => {
-    const found = await pool.query(`SELECT id, outlet_id, user_id, check_in FROM attendance WHERE id = $1`, [req.params.id]);
+    const found = await pool.query(`SELECT id, outlet_id, user_id, check_in, check_out FROM attendance WHERE id = $1`, [req.params.id]);
     const row = found.rows[0];
     if (!row) throw bad("Attendance not found.", 404);
     await assertOutlet(pool, req.user, row.outlet_id);
+    if (req.body?.checkIn) {
+      const checkIn = punchAt(req.body?.at);
+      if (row.check_out && checkIn.getTime() >= new Date(row.check_out).getTime()) {
+        throw bad("Check in must be before check out.");
+      }
+      await pool.query(`UPDATE attendance SET check_in = $2 WHERE id = $1`, [row.id, checkIn.toISOString()]);
+      await log(req.user, row.outlet_id, "check-in", "Updated check-in time", "attendance", row.id);
+      res.json({ id: row.id });
+      return;
+    }
     const checkOut = punchAt(req.body?.at);
     if (checkOut.getTime() <= new Date(row.check_in).getTime()) throw bad("Check out must be after check in.");
-    await pool.query(`UPDATE attendance SET check_out = $2 WHERE id = $1 AND check_out IS NULL`, [row.id, checkOut.toISOString()]);
-    await log(req.user, row.outlet_id, "check-out", "Checked out", "attendance", row.id);
+    await pool.query(`UPDATE attendance SET check_out = $2 WHERE id = $1`, [row.id, checkOut.toISOString()]);
+    await log(req.user, row.outlet_id, "check-out", row.check_out ? "Updated check-out time" : "Checked out", "attendance", row.id);
     res.json({ id: row.id });
   }));
 
