@@ -818,6 +818,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         }
       }
 
+      entry.cashAdjustment = cashAdjust;
       const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust);
       if (posted) {
         await client.query(
@@ -827,7 +828,10 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           [shift.id, JSON.stringify(entry), expected, shift.status === "closed" ? shift.closed_by : null, req.user.id],
         );
       } else {
-        await client.query(`UPDATE shifts SET entry = $2::jsonb WHERE id = $1`, [shift.id, JSON.stringify(entry)]);
+        await client.query(
+          `UPDATE shifts SET entry = $2::jsonb, expected_cash = $3 WHERE id = $1`,
+          [shift.id, JSON.stringify(entry), expected],
+        );
       }
       await client.query("COMMIT");
     } catch (error) {
