@@ -583,17 +583,32 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       employeeCode = await takeEmployeeCode(row.settings_id, req.body.employeeCode, row.id);
     }
     const body = req.body ?? {};
-    const touchesProfile = ["name", "phone", "email", "address", "active", "designation", "staffType"].some((key) =>
+    const touchesProfile = ["name", "phone", "altPhone", "email", "address", "active", "designation", "staffType", "bankName", "accountNo"].some((key) =>
       Object.prototype.hasOwnProperty.call(body, key),
     );
     if (touchesProfile) {
       if (!["owner", "super_admin"].includes(req.user.role)) throw bad("You cannot edit staff.", 403);
       const name = String(body.name ?? "").trim();
       if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Name is required.");
+      if (Object.prototype.hasOwnProperty.call(body, "phone")) {
+        const digits = String(body.phone ?? "").replace(/\D/g, "");
+        if (!digits) throw bad("Mobile is required.");
+        const taken = await pool.query(
+          `SELECT id FROM users
+           WHERE regexp_replace(COALESCE(phone, ''), '\\D', '', 'g') = $1
+             AND active = true
+             AND id <> $2
+             AND role = ANY($3::user_role[])`,
+          [digits, row.id, ["super_admin", "owner", "manager", "staff", "credit_customer", "auditor", "accounts_auditor", "attendance"]],
+        );
+        if (taken.rows.length) throw bad("That mobile is already in use.");
+      }
       let staffType = null;
       if (Object.prototype.hasOwnProperty.call(body, "staffType")) {
         staffType = String(body.staffType ?? "").trim();
         if (staffType && !STAFF_TYPES.includes(staffType)) throw bad("Pick a staff type.");
+        const nextRole = body.role === "manager" || body.role === "staff" ? body.role : row.role;
+        if (nextRole === "staff" && !staffType) throw bad("Pick a staff type.");
       }
       await pool.query(
         `UPDATE users SET
@@ -604,7 +619,10 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
            active = CASE WHEN $10 THEN $11 ELSE active END,
            designation = CASE WHEN $12 THEN $13 ELSE designation END,
            staff_type = CASE WHEN $14 THEN $15::staff_type ELSE staff_type END,
-           role = CASE WHEN $16 THEN $17::user_role ELSE role END
+           role = CASE WHEN $16 THEN $17::user_role ELSE role END,
+           alt_phone = CASE WHEN $18 THEN $19 ELSE alt_phone END,
+           bank_name = CASE WHEN $20 THEN $21 ELSE bank_name END,
+           account_no = CASE WHEN $22 THEN $23 ELSE account_no END
          WHERE id = $1`,
         [
           row.id,
@@ -624,6 +642,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           staffType || null,
           body.role === "manager" || body.role === "staff",
           body.role === "manager" ? "manager" : "staff",
+          Object.prototype.hasOwnProperty.call(body, "altPhone"),
+          String(body.altPhone ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "bankName"),
+          String(body.bankName ?? "").trim() || null,
+          Object.prototype.hasOwnProperty.call(body, "accountNo"),
+          String(body.accountNo ?? "").trim() || null,
         ],
       );
     }
@@ -643,13 +667,18 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         employeeCode,
       ],
     );
+    const removing = body.active === false;
     await log(
       req.user,
       row.outlet_id,
-      touchesCode && !Array.isArray(req.body?.permissionGrants) ? "updated" : "permission",
-      touchesCode && !Array.isArray(req.body?.permissionGrants)
-        ? `Employee ID ${employeeCode || "cleared"}`
-        : (req.body?.detail || "Permissions updated"),
+      touchesProfile || (touchesCode && !Array.isArray(req.body?.permissionGrants)) ? "updated" : "permission",
+      removing
+        ? (body.detail || "Staff removed")
+        : touchesProfile
+          ? (body.detail || "Staff updated")
+          : touchesCode && !Array.isArray(req.body?.permissionGrants)
+            ? `Employee ID ${employeeCode || "cleared"}`
+            : (req.body?.detail || "Permissions updated"),
       "users",
       row.id,
     );
