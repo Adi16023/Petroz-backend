@@ -77,6 +77,18 @@ function creditSalesOf(raw) {
   })).filter((row) => row.name || row.customerId || row.amount > 0);
 }
 
+function creditReceiptsOf(raw) {
+  const rows = Array.isArray(raw) ? raw : [];
+  return rows.slice(0, 80).map((row) => ({
+    kind: String(row?.kind ?? "") === "temp_credit" ? "temp_credit" : "credit",
+    customerId: uuidOrNull(row?.customerId),
+    name: clip(row?.name, 80),
+    phone: clip(row?.phone, 20),
+    vehicle: clip(row?.vehicle, 40),
+    amount: Math.max(0, num(row?.amount) ?? 0),
+  })).filter((row) => row.customerId && row.amount > 0);
+}
+
 function entryOf(body) {
   const raw = body?.entry && typeof body.entry === "object" ? body.entry : {};
   const totals = raw.totals && typeof raw.totals === "object" ? raw.totals : {};
@@ -96,6 +108,7 @@ function entryOf(body) {
     cashCount: cashCountOf(raw),
     totalNotes: noteMap(notes),
     creditSales: creditSalesOf(raw.creditSales),
+    creditReceipts: creditReceiptsOf(raw.creditReceipts),
     incident: {
       type: clip(incident.type, 80),
       pumpId: uuidOrNull(incident.pumpId),
@@ -256,14 +269,22 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
   async function bundle(shift, settingsId) {
     const outletId = shift.outlet_id;
     const duties = Array.isArray(shift.duties) ? shift.duties : [];
-    const [nozzles, readings, previous, priorShiftOpen, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent, creditPeople, tempPeople, shiftCredits, latestFuel] = await Promise.all([
+    const savedEntry = shift.entry && typeof shift.entry === "object" ? shift.entry : {};
+    const assignedNozzles = [...new Set(
+      [
+        ...(Array.isArray(savedEntry.nozzleIds) ? savedEntry.nozzleIds : []),
+        ...duties.map((duty) => duty.nozzleId),
+      ].map((id) => uuidOrNull(id)).filter(Boolean),
+    )];
+    const [nozzles, readings, openingReadings, priorShiftOpen, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent, creditPeople, tempPeople, shiftCredits, latestFuel] = await Promise.all([
       pool.query(
         `SELECT e.id, e.label, e.meter, e.product_id, pr.name AS product_name, pr.unit, pr.selling_price, pr.price_at
          FROM equipment e
          LEFT JOIN products pr ON pr.id = e.product_id
          WHERE e.outlet_id = $1 AND e.kind = 'nozzle' AND e.active = true
+           AND (CARDINALITY($2::uuid[]) = 0 OR e.id = ANY($2::uuid[]))
          ORDER BY e.label`,
-        [outletId],
+        [outletId, assignedNozzles],
       ),
       pool.query(
         `SELECT equipment_id, kind, qty FROM dip_readings
@@ -340,10 +361,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         `SELECT e.doc_date, e.category, e.amount, e.mode::text AS mode, e.note, u.name AS party_name
          FROM expenses e
          LEFT JOIN users u ON u.id = e.created_by
-         WHERE e.outlet_id = $1 AND (e.shift_id IS NULL OR e.shift_id <> $2) AND e.kind = 'expense' AND e.status <> 'cancelled'
-         ORDER BY e.doc_date DESC, e.created_at DESC
-         LIMIT 20`,
-        [outletId, shift.id],
+         WHERE e.shift_id = $1 AND e.kind = 'expense' AND e.status <> 'cancelled'
+         ORDER BY e.doc_date DESC, e.created_at DESC`,
+        [shift.id],
       ),
       pool.query(
         `SELECT id, name, brand, unit, selling_price
@@ -383,6 +403,13 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
                   WHERE s.reference = c.id::text
                     AND s.category = 'shift_temp_credit'
                     AND s.status <> 'cancelled'
+                ), 0)
+                - COALESCE((
+                  SELECT SUM(d.net) FROM documents d
+                  WHERE d.reference = c.id::text
+                    AND d.kind = 'receipt'
+                    AND d.category = 'shift_credit_receipt'
+                    AND d.status <> 'cancelled'
                 ), 0) AS outstanding
          FROM temp_credit_customers c
          WHERE c.outlet_id = $1
@@ -414,7 +441,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       ? shift.entry.meters
       : {};
     const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(row.qty)]));
-    const prev = new Map(previous.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
+    const openingMeters = new Map(openingReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const priorOpen = new Map(priorShiftOpen.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const fuelByNozzle = new Map(fuel.rows.map((row) => [row.equipment_id, row]));
     const latestByProduct = new Map(latestFuel.rows.map((row) => [row.product_id, { rate: num(row.rate) ?? 0, at: row.created_at }]));
@@ -449,7 +476,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       nozzles: nozzles.rows.map((row) => {
         const savedOpen = opening.has(row.id);
         const fromPrior = priorOpen.has(row.id) ? priorOpen.get(row.id) ?? 0 : null;
-        const baseline = fromPrior != null ? fromPrior : prev.has(row.id) ? prev.get(row.id) ?? 0 : num(row.meter) ?? 0;
+        const baseline = fromPrior != null ? fromPrior : openingMeters.has(row.id) ? openingMeters.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const line = fuelByNozzle.get(row.id);
         const ownRate = line ? num(line.rate) : null;
         const catalog = num(row.selling_price) ?? 0;
@@ -458,20 +485,20 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const latestAt = latest?.at ? new Date(latest.at).getTime() : 0;
         const currentRate = latest && latest.rate > 0 && latestAt >= priceAt ? latest.rate : catalog || latest?.rate || 0;
         const priceIsNewer = catalog > 0 && priceAt > latestAt;
-        const savedPrevious = savedMeters[row.id];
-        const savedPrevNum = savedPrevious == null || savedPrevious === "" ? null : num(savedPrevious);
+        const savedOpening = savedMeters[row.id];
+        const savedOpeningNum = savedOpening == null || savedOpening === "" ? null : num(savedOpening);
         const savedOpenQty = savedOpen ? opening.get(row.id) ?? 0 : null;
-        const untouched = savedOpenQty == null || (savedPrevNum != null && savedPrevNum === savedOpenQty);
-        const previousReading = fromPrior != null && (savedPrevNum == null || untouched) ? fromPrior : savedPrevNum ?? baseline;
-        const openQty = untouched && fromPrior != null ? fromPrior : savedOpenQty ?? previousReading;
-        const sold = round2(openQty - previousReading);
+        const untouched = savedOpenQty == null || (savedOpeningNum != null && savedOpeningNum === savedOpenQty);
+        const openingReading = fromPrior != null && (savedOpeningNum == null || untouched) ? fromPrior : savedOpeningNum ?? baseline;
+        const closingQty = untouched && fromPrior != null ? fromPrior : savedOpenQty ?? openingReading;
+        const sold = round2(closingQty - openingReading);
         return {
           id: row.id,
           label: row.label,
           fuel: row.product_name || "Fuel",
           unit: row.unit || "L",
-          previous: previousReading,
-          opening: openQty,
+          opening: openingReading,
+          closing: closingQty,
           qty: sold ?? 0,
           test: num(line?.test_qty) ?? 0,
           rate: priceIsNewer ? catalog : ownRate != null && ownRate > 0 ? ownRate : currentRate,
@@ -559,6 +586,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
             amount: num(row.net) ?? 0,
           }))
         : creditSalesOf(shift.entry?.creditSales),
+      creditReceipts: creditReceiptsOf(shift.entry?.creditReceipts),
     };
   }
 
@@ -575,8 +603,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const meters = {};
     for (const row of pumps) {
       const id = uuidOrNull(row.equipmentId);
-      if (!id || row.previous == null || row.previous === "") continue;
-      meters[id] = money(row.previous);
+      if (!id || row.opening == null || row.opening === "") continue;
+      meters[id] = money(row.opening);
     }
     const entry = { ...entryOf(req.body), meters };
     const kept = shift.entry && typeof shift.entry === "object" ? shift.entry : {};
@@ -646,9 +674,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const id = uuidOrNull(row.equipmentId);
         const nozzle = id ? nozzleById.get(id) : null;
         if (!nozzle) continue;
-        const opening = money(row.opening);
-        if (row.previous != null && row.previous !== "") {
-          const value = money(row.previous);
+        const closing = money(row.closing);
+        if (row.opening != null && row.opening !== "") {
+          const value = money(row.opening);
           const stamped = await client.query(
             `SELECT qty FROM dip_readings
              WHERE equipment_id = $1 AND kind = 'closing' AND remarks = 'previous closing'
@@ -665,7 +693,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
             );
           }
         }
-        const sold = Math.max(0, round2(opening - money(row.previous)));
+        const sold = Math.max(0, round2(closing - money(row.opening)));
         const test = Math.min(sold, Math.max(0, money(row.test)));
         const rate = Math.max(0, money(row.rate));
         const netQty = Math.max(0, sold - test);
@@ -676,11 +704,10 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
             [nozzle.product_id, rate],
           );
         }
-        const closing = opening;
         await client.query(
           `INSERT INTO dip_readings (shift_id, equipment_id, user_id, kind, qty)
            VALUES ($1, $2, $3, 'opening'::reading_kind, $4), ($1, $2, $3, 'closing'::reading_kind, $5)`,
-          [shift.id, nozzle.id, req.user.id, opening, closing],
+          [shift.id, nozzle.id, req.user.id, closing, closing],
         );
         await client.query(`UPDATE equipment SET meter = $2 WHERE id = $1`, [nozzle.id, closing]);
         if (!(sold > 0) && !(amount > 0)) continue;
@@ -795,6 +822,47 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         `DELETE FROM sales WHERE shift_id = $1 AND category IN ('shift_credit', 'shift_temp_credit')`,
         [shift.id],
       );
+      await client.query(
+        `DELETE FROM documents
+         WHERE shift_id = $1 AND kind = 'receipt' AND category = 'shift_credit_receipt'`,
+        [shift.id],
+      );
+      for (const row of entry.creditReceipts) {
+        if (!(row.amount > 0) || !row.customerId) continue;
+        if (row.kind === "temp_credit") {
+          const found = await client.query(
+            `SELECT id FROM temp_credit_customers WHERE id = $1 AND outlet_id = $2`,
+            [row.customerId, outlet.id],
+          );
+          if (!found.rows[0]) {
+            const error = new Error("Choose a temporary credit customer.");
+            error.status = 400;
+            throw error;
+          }
+          await client.query(
+            `INSERT INTO documents (
+               outlet_id, shift_id, kind, status, doc_date, amount, net, mode, category, reference, vehicle, note, created_by
+             ) VALUES ($1,$2,'receipt','paid',$3,$4,$4,'cash','shift_credit_receipt',$5,$6,$7,$8)`,
+            [outlet.id, shift.id, docDate, row.amount, row.customerId, row.vehicle || null, row.name || null, req.user.id],
+          );
+          continue;
+        }
+        const found = await client.query(
+          `SELECT id FROM users WHERE id = $1 AND outlet_id = $2 AND role = 'credit_customer'`,
+          [row.customerId, outlet.id],
+        );
+        if (!found.rows[0]) {
+          const error = new Error("Choose a credit customer on this outlet.");
+          error.status = 400;
+          throw error;
+        }
+        await client.query(
+          `INSERT INTO documents (
+             outlet_id, user_id, shift_id, kind, status, doc_date, amount, net, mode, category, vehicle, note, created_by
+           ) VALUES ($1,$2,$3,'receipt','paid',$4,$5,$5,'cash','shift_credit_receipt',$6,$7,$8)`,
+          [outlet.id, row.customerId, shift.id, docDate, row.amount, row.vehicle || null, row.name || null, req.user.id],
+        );
+      }
       if (posted) {
         for (const row of entry.creditSales) {
           if (!(row.amount > 0)) continue;
@@ -819,7 +887,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       }
 
       entry.cashAdjustment = cashAdjust;
-      const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust);
+      const creditReceived = round2(entry.creditReceipts.reduce((sum, row) => sum + (row.amount || 0), 0));
+      entry.creditReceived = creditReceived;
+      const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust + creditReceived);
       if (posted) {
         await client.query(
           `UPDATE shifts

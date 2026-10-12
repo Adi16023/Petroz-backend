@@ -23,7 +23,7 @@ function sameQty(left, right) {
   return Math.round(Number(left) * 1000) === Math.round(Number(right) * 1000);
 }
 
-async function appendPreviousClosing(pool, equipmentId, meter) {
+async function appendOpeningReading(pool, equipmentId, meter) {
   const latest = await pool.query(
     `SELECT qty FROM dip_readings
      WHERE equipment_id = $1 AND kind = 'closing' AND remarks = 'previous closing'
@@ -153,8 +153,8 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk, scop
         tankByFuel.set(key, parentId);
         keptTanks.push(parentId);
       }
-      const previous = String(slot.previous ?? "").trim();
-      const meter = previous === "" ? null : money(previous);
+      const opening = String(slot.opening ?? slot.previous ?? "").trim();
+      const meter = opening === "" ? null : money(opening);
       const label = `${pumpName} N${index + 1}`;
       const ref = `nozzle:${pumpId}:${index}`;
       await pool.query(
@@ -177,7 +177,7 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk, scop
          RETURNING id`,
         [outletId, parentId, productId, label, meter, pumpName, ref, slot.on !== false],
       );
-      if (meter != null) await appendPreviousClosing(pool, rows[0].id, meter);
+      if (meter != null) await appendOpeningReading(pool, rows[0].id, meter);
       keptNozzles.push(rows[0].id);
     }
   }
