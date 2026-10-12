@@ -494,6 +494,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         res.json({ id: row.id, status: status ?? null });
         return;
       }
+      if (table === "sales" && Object.prototype.hasOwnProperty.call(req.body ?? {}, "docNo")) {
+        const docNo = String(req.body.docNo ?? "").trim() || null;
+        await pool.query(`UPDATE sales SET doc_no = $2 WHERE id = $1`, [row.id, docNo]);
+        await log(req.user, row.outlet_id, "updated", `invoice ${docNo ?? ""}`.trim(), table, row.id);
+        res.json({ id: row.id, docNo });
+        return;
+      }
       if (status) {
         const decided = table === "expenses" || table === "purchases" ? ", decided_by = $3" : "";
         await pool.query(
