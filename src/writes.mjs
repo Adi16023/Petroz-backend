@@ -1264,7 +1264,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       throw bad("End must be after the start.");
     }
     const now = Date.now();
-    const status = now >= endMs ? "closed" : now >= startMs ? "open" : "upcoming";
+    const status = now >= startMs ? "open" : "upcoming";
     const startIso = new Date(startMs).toISOString();
     const endIso = new Date(endMs).toISOString();
     const requested = uuidList(req.body?.staffIds);

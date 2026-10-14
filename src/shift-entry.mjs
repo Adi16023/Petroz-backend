@@ -240,13 +240,24 @@ async function ensureTempCustomer(client, outletId, row) {
   return inserted.rows[0].id;
 }
 
-/** Upcoming shifts open once the current instant reaches starts_at. That instant is the IST start the dealer picked. */
+/** Upcoming shifts open once the current instant reaches starts_at. Closed is written only when someone closes the shift. */
 export async function promoteDueShifts(pool, outletId) {
   await pool.query(
     `UPDATE shifts
      SET status = 'open'
      WHERE status = 'upcoming'
        AND starts_at <= now()
+       AND ($1::uuid IS NULL OR outlet_id = $1)`,
+    [outletId ?? null],
+  );
+  await pool.query(
+    `UPDATE shifts
+     SET status = CASE
+       WHEN starts_at <= now() THEN 'open'::shift_status
+       ELSE 'upcoming'::shift_status
+     END
+     WHERE status = 'closed'
+       AND closed_by IS NULL
        AND ($1::uuid IS NULL OR outlet_id = $1)`,
     [outletId ?? null],
   );
