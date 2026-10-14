@@ -1301,6 +1301,34 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      const stock = await client.query(
+        `SELECT l.qty, l.product_id, pr.kind
+         FROM sale_items l
+         JOIN sales s ON s.id = l.sale_id
+         LEFT JOIN products pr ON pr.id = l.product_id
+         WHERE s.shift_id = $1 AND s.category IN ('shift_fuel', 'shift_lube') AND s.status <> 'cancelled'`,
+        [shift.id],
+      );
+      for (const row of stock.rows) {
+        const qty = Number(row.qty) || 0;
+        if (!row.product_id || !qty) continue;
+        if (row.kind === "fuel") {
+          await client.query(
+            `UPDATE equipment SET live_qty = live_qty + $3
+             WHERE id = (
+               SELECT e.id FROM equipment e
+               WHERE e.outlet_id = $1 AND e.kind = 'tank' AND e.product_id = $2
+               ORDER BY e.label LIMIT 1
+             )`,
+            [shift.outlet_id, row.product_id, qty / 1000],
+          );
+          continue;
+        }
+        await client.query(
+          `UPDATE balances SET on_hand = on_hand + $3 WHERE outlet_id = $1 AND product_id = $2`,
+          [shift.outlet_id, row.product_id, qty],
+        );
+      }
       await client.query(`DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE shift_id = $1)`, [shift.id]);
       await client.query(`DELETE FROM sales WHERE shift_id = $1`, [shift.id]);
       await client.query(`DELETE FROM purchase_items WHERE purchase_id IN (SELECT id FROM purchases WHERE shift_id = $1)`, [shift.id]);
