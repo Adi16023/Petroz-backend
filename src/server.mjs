@@ -480,6 +480,51 @@ app.post("/api/temp-credit-customers", wrap(async (req, res) => {
   res.status(201).json(tempCreditDto(rows[0]));
 }));
 
+app.patch("/api/temp-credit-customers/:id", wrap(async (req, res) => {
+  const { rows: found } = await pool.query(`SELECT outlet_id FROM temp_credit_customers WHERE id = $1`, [req.params.id]);
+  if (!found[0]) throw bad("Customer not found.", 404);
+  const outlet = await assertOutlet(pool, req.user, found[0].outlet_id);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can edit a temporary credit customer.", 403);
+  }
+  const name = String(req.body?.name ?? "").trim();
+  const phone = String(req.body?.phone ?? "").trim();
+  const vehicle = String(req.body?.vehicle ?? "").trim();
+  if (!name) throw bad("Enter the customer name.");
+  const { rows } = await pool.query(
+    `UPDATE temp_credit_customers
+     SET name = $2, phone = $3, vehicle = $4
+     WHERE id = $1 AND outlet_id = $5
+     RETURNING id, name, phone, vehicle,
+       COALESCE((
+         SELECT SUM(s.net) FROM sales s
+         WHERE s.reference = $1
+           AND s.category = 'shift_temp_credit'
+           AND s.status <> 'cancelled'
+       ), 0) AS outstanding`,
+    [req.params.id, name, phone, vehicle, outlet.id],
+  );
+  res.json(tempCreditDto(rows[0]));
+}));
+
+app.delete("/api/temp-credit-customers/:id", wrap(async (req, res) => {
+  const { rows: found } = await pool.query(`SELECT outlet_id FROM temp_credit_customers WHERE id = $1`, [req.params.id]);
+  if (!found[0]) throw bad("Customer not found.", 404);
+  const outlet = await assertOutlet(pool, req.user, found[0].outlet_id);
+  if (req.user.role !== "owner" && req.user.role !== "manager" && req.user.role !== "super_admin") {
+    throw bad("Only the dealer can delete a temporary credit customer.", 403);
+  }
+  const { rows: due } = await pool.query(
+    `SELECT COALESCE(SUM(net), 0) AS outstanding
+     FROM sales
+     WHERE reference = $1 AND category = 'shift_temp_credit' AND status <> 'cancelled'`,
+    [req.params.id],
+  );
+  if (Number(due[0]?.outstanding) > 0) throw bad("This customer still has an outstanding balance.");
+  await pool.query(`DELETE FROM temp_credit_customers WHERE id = $1 AND outlet_id = $2`, [req.params.id, outlet.id]);
+  res.json({ ok: true });
+}));
+
 app.get("/api/bank-accounts", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const { rows } = await pool.query(
