@@ -8,6 +8,7 @@ import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./aut
 import { ensureDemo } from "./demo.mjs";
 import { ensureAttendanceUser, ensureSeed, ensureSuperAdmin } from "./seed.mjs";
 import { promoteDueShifts } from "./shift-entry.mjs";
+import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
 
 const DOCUMENT_KINDS = [
@@ -78,6 +79,7 @@ function partyDto(row, extra = {}) {
     bankName: row.bank_name,
     accountNo: row.account_no,
     active: row.active,
+    profile: row.profile && typeof row.profile === "object" ? row.profile : {},
     outletIds: row.outlet_ids ?? [],
     ...extra,
   };
@@ -133,6 +135,7 @@ function documentDto(row) {
     reimbursable: row.reimbursable,
     deductFromShiftCash: row.deduct_from_shift_cash,
     attachment: row.attachment,
+    flag: row.flag ?? null,
     createdBy: row.created_by,
     decidedBy: row.decided_by,
     createdAt: row.created_at,
@@ -171,7 +174,7 @@ function bad(message, status = 400) {
 
 const app = express();
 app.use(cors());
-app.use(express.json({ limit: "2mb" }));
+app.use(express.json({ limit: "12mb" }));
 
 app.get("/health", (_req, res) => {
   res.json({ ok: true });
@@ -1258,6 +1261,8 @@ app.get("/api/readings", wrap(async (req, res) => {
     bookQty: num(row.book_qty),
     status: row.status,
     remarks: row.remarks,
+    reviewNote: row.review_note,
+    reviewedAt: row.reviewed_at,
   })));
 }));
 
@@ -1312,7 +1317,7 @@ app.get("/api/products", wrap(async (req, res) => {
      ORDER BY pr.kind, pr.name`,
     [outlet.id, outlet.settings_id],
   );
-  res.json(rows.map((row) => ({
+  res.json(await Promise.all(rows.map(async (row) => ({
     id: row.id,
     kind: row.kind,
     name: row.name,
@@ -1326,7 +1331,8 @@ app.get("/api/products", wrap(async (req, res) => {
     active: row.active !== false,
     onHand: num(row.on_hand) ?? 0,
     minQty: num(row.min_qty) ?? 0,
-  })));
+    imageUrl: await signedUrl(row.image_key),
+  }))));
 }));
 
 app.get("/api/products/:id", wrap(async (req, res) => {
@@ -1418,6 +1424,18 @@ async function creditExtras(outletId) {
   return new Map(rows.map((row) => [row.user_id, row]));
 }
 
+async function withPhoto(party) {
+  const profile = party.profile && typeof party.profile === "object" ? { ...party.profile } : {};
+  if (profile.photoKey) profile.photoUrl = await signedUrl(profile.photoKey);
+  if (Array.isArray(profile.documents)) {
+    profile.documents = await Promise.all(profile.documents.map(async (doc) => ({
+      ...doc,
+      url: doc?.key ? await signedUrl(doc.key) : null,
+    })));
+  }
+  return { ...party, profile, photoUrl: profile.photoUrl ?? null };
+}
+
 function withCredit(row, extras) {
   if (row.role !== "credit_customer") return partyDto(row);
   const extra = extras.get(row.id);
@@ -1451,7 +1469,7 @@ app.get("/api/parties", wrap(async (req, res) => {
     [outlet.id, outlet.settings_id, role],
   );
   const extras = await creditExtras(outlet.id);
-  res.json(rows.map((row) => withCredit(row, extras)));
+  res.json(await Promise.all(rows.map((row) => withPhoto(withCredit(row, extras)))));
 }));
 
 app.get("/api/parties/:id", wrap(async (req, res) => {
@@ -1475,7 +1493,7 @@ app.get("/api/parties/:id", wrap(async (req, res) => {
   const outletId = req.query.outletId || shared[0] || allowed[0];
   if (outletId) await assertOutlet(pool, req.user, outletId);
   const extras = outletId ? await creditExtras(outletId) : new Map();
-  res.json(withCredit(row, extras));
+  res.json(await withPhoto(withCredit(row, extras)));
 }));
 
 const documentSelect = `
@@ -1746,6 +1764,7 @@ app.get("/api/activity", wrap(async (req, res) => {
   })));
 }));
 
+registerFiles(app, { pool, wrap, bad, assertOutlet });
 registerWrites(app, { pool, wrap, bad, assertOutlet });
 
 app.use((error, _req, res, _next) => {

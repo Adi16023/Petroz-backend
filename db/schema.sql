@@ -526,6 +526,26 @@ CREATE INDEX IF NOT EXISTS outlets_settings_idx ON outlets (settings_id);
 CREATE INDEX IF NOT EXISTS users_settings_idx ON users (settings_id);
 CREATE INDEX IF NOT EXISTS users_role_idx ON users (role);
 CREATE INDEX IF NOT EXISTS users_outlet_idx ON users (outlet_id);
+ALTER TABLE users ADD COLUMN IF NOT EXISTS profile jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE products ADD COLUMN IF NOT EXISTS image_key text;
+ALTER TABLE expenses ADD COLUMN IF NOT EXISTS flag text;
+ALTER TABLE dip_readings ADD COLUMN IF NOT EXISTS review_note text;
+ALTER TABLE dip_readings ADD COLUMN IF NOT EXISTS reviewed_at timestamptz;
+
+CREATE TABLE IF NOT EXISTS files (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid REFERENCES outlets (id),
+  settings_id uuid REFERENCES settings (id),
+  kind text NOT NULL,
+  name text NOT NULL,
+  content_type text,
+  object_key text NOT NULL,
+  created_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS files_outlet_idx ON files (outlet_id, created_at DESC);
+
 ALTER TABLE products ADD COLUMN IF NOT EXISTS settings_ref text;
 ALTER TABLE products ADD COLUMN IF NOT EXISTS active boolean NOT NULL DEFAULT true;
 ALTER TABLE equipment ADD COLUMN IF NOT EXISTS settings_ref text;

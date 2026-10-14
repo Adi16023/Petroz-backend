@@ -305,15 +305,15 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           `INSERT INTO expenses (
              outlet_id, user_id, shift_id, kind, status, doc_no, doc_date, due_date,
              amount, charges, net, mode, category, note, frequency, next_due,
-             reimbursable, deduct_from_shift_cash, created_by
-           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
+             reimbursable, deduct_from_shift_cash, created_by, attachment, flag
+           ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
            RETURNING id`,
           [
             outlet.id, userId, req.body?.shiftId || null, kind, status, req.body?.docNo || null,
             day(req.body?.docDate), optionalDay(req.body?.dueDate), amount, charges, net, mode,
             req.body?.category || null, req.body?.note || null, req.body?.frequency || null,
             optionalDay(req.body?.nextDue), Boolean(req.body?.reimbursable), Boolean(req.body?.deductFromShiftCash),
-            req.user.id,
+            req.user.id, req.body?.attachment || null, req.body?.flag || null,
           ],
         );
         id = inserted.rows[0].id;
@@ -465,6 +465,8 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "note")) put("note", String(req.body.note ?? "").trim() || null);
         if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "mode")) put("mode", payMode(req.body.mode));
         if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "category")) put("category", String(req.body.category ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "attachment")) put("attachment", String(req.body.attachment ?? "").trim() || null);
+        if (Object.prototype.hasOwnProperty.call(req.body ?? {}, "flag")) put("flag", String(req.body.flag ?? "").trim() || null);
         if (status) {
           put("status", status);
           put("decided_by", req.user.id);
@@ -525,6 +527,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         await log(req.user, row.outlet_id, "updated", `invoice ${docNo ?? ""}`.trim(), table, row.id);
         res.json({ id: row.id, docNo });
         return;
+      }
+      if (table === "documents" && Object.prototype.hasOwnProperty.call(req.body ?? {}, "note")) {
+        await pool.query(`UPDATE documents SET note = $2 WHERE id = $1`, [row.id, String(req.body.note ?? "")]);
       }
       if (status) {
         const decided = table === "expenses" || table === "purchases" ? ", decided_by = $3" : "";
@@ -634,6 +639,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       ],
     );
     const id = rows[0].id;
+    if (req.body?.profile && typeof req.body.profile === "object" && !Array.isArray(req.body.profile)) {
+      await pool.query(`UPDATE users SET profile = $2::jsonb WHERE id = $1`, [id, JSON.stringify(req.body.profile)]);
+    }
     await log(req.user, outlet.id, "created", name, "users", id);
     res.status(201).json({ id, canSignIn: role === "staff" || role === "manager" });
   }));
@@ -720,6 +728,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           Object.prototype.hasOwnProperty.call(body, "accountNo"),
           String(body.accountNo ?? "").trim() || null,
         ],
+      );
+    }
+    if (req.body?.profile && typeof req.body.profile === "object" && !Array.isArray(req.body.profile)) {
+      if (!["owner", "super_admin", "manager", "attendance"].includes(req.user.role)) throw bad("You cannot edit this profile.", 403);
+      await pool.query(
+        `UPDATE users SET profile = COALESCE(profile, '{}'::jsonb) || $2::jsonb WHERE id = $1`,
+        [row.id, JSON.stringify(req.body.profile)],
       );
     }
     await pool.query(
@@ -837,6 +852,22 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         body.active !== false,
       ],
     );
+    if (Object.prototype.hasOwnProperty.call(body, "imageKey")) {
+      await pool.query(`UPDATE products SET image_key = $2 WHERE id = $1`, [req.params.id, String(body.imageKey ?? "").trim() || null]);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "brand")) {
+      await pool.query(`UPDATE products SET brand = $2 WHERE id = $1`, [req.params.id, String(body.brand ?? "").trim() || null]);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "code")) {
+      await pool.query(`UPDATE products SET code = $2 WHERE id = $1`, [req.params.id, String(body.code ?? "").trim() || null]);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "hsn")) {
+      await pool.query(`UPDATE products SET hsn = $2 WHERE id = $1`, [req.params.id, String(body.hsn ?? "").trim() || null]);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "kind")) {
+      const kind = body.kind === "fmcg" ? "fmcg" : "lube";
+      await pool.query(`UPDATE products SET kind = $2::product_kind WHERE id = $1 AND kind <> 'fuel'`, [req.params.id, kind]);
+    }
     await log(req.user, outlet.id, "updated", name || "Product updated", "products", req.params.id);
     res.json({ id: req.params.id });
   }));
@@ -1728,6 +1759,24 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     res.json({ ok: true });
   }));
 
+  app.patch("/api/readings/:id", wrap(async (req, res) => {
+    const found = await pool.query(
+      `SELECT r.id, e.outlet_id FROM dip_readings r JOIN equipment e ON e.id = r.equipment_id WHERE r.id = $1`,
+      [req.params.id],
+    );
+    const row = found.rows[0];
+    if (!row) throw bad("Reading not found.", 404);
+    await assertOutlet(pool, req.user, row.outlet_id);
+    const note = String(req.body?.reviewNote ?? "").trim();
+    if (!note) throw bad("Add a reason.");
+    await pool.query(
+      `UPDATE dip_readings SET review_note = $2, reviewed_at = now(), remarks = $2 WHERE id = $1`,
+      [row.id, note],
+    );
+    await log(req.user, row.outlet_id, "review", note, "dip_readings", row.id);
+    res.json({ id: row.id });
+  }));
+
   app.patch("/api/dealer", wrap(async (req, res) => {
     const hasCompany = req.body != null && Object.prototype.hasOwnProperty.call(req.body, "companyImage");
     const hasBanner = req.body != null && Object.prototype.hasOwnProperty.call(req.body, "bannerImage");
@@ -1754,6 +1803,24 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       await pool.query(
         `UPDATE settings SET schedules = schedules || $2::jsonb WHERE id = $1`,
         [req.user.settings_id, JSON.stringify([{ name: req.body.schedule.name, cadence: req.body.schedule.cadence || "" }])],
+      );
+    }
+    if (req.body?.attendance && typeof req.body.attendance === "object" && !Array.isArray(req.body.attendance)) {
+      if (!["owner", "super_admin", "manager", "attendance"].includes(req.user.role)) throw bad("You cannot save attendance settings.", 403);
+      let settingsId = req.user.settings_id;
+      if (!settingsId && req.body.outletId) {
+        const outlet = await assertOutlet(pool, req.user, req.body.outletId);
+        settingsId = outlet.settings_id;
+      }
+      if (!settingsId) throw bad("Pick a dealer first.");
+      await pool.query(
+        `UPDATE settings SET prefs = jsonb_set(
+           COALESCE(prefs, '{}'::jsonb),
+           '{attendance}',
+           COALESCE(prefs->'attendance', '{}'::jsonb) || $2::jsonb,
+           true
+         ) WHERE id = $1`,
+        [settingsId, JSON.stringify(req.body.attendance)],
       );
     }
     if (req.body?.prefs && typeof req.body.prefs === "object" && !Array.isArray(req.body.prefs)) {
