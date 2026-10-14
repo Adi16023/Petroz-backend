@@ -687,6 +687,27 @@ CREATE TABLE IF NOT EXISTS queries (
 
 CREATE INDEX IF NOT EXISTS queries_outlet_idx ON queries (outlet_id, created_at DESC);
 
+CREATE TABLE IF NOT EXISTS support_tickets (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid REFERENCES outlets (id) ON DELETE CASCADE,
+  number text NOT NULL,
+  category text NOT NULL DEFAULT '',
+  message text NOT NULL DEFAULT '',
+  reply text NOT NULL DEFAULT '',
+  status text NOT NULL DEFAULT 'open',
+  name text NOT NULL DEFAULT '',
+  email text NOT NULL DEFAULT '',
+  phone text NOT NULL DEFAULT '',
+  role text NOT NULL DEFAULT '',
+  user_id uuid REFERENCES users (id),
+  created_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (status IN ('open', 'closed'))
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS support_tickets_number_idx ON support_tickets (number);
+CREATE INDEX IF NOT EXISTS support_tickets_created_idx ON support_tickets (created_at DESC);
+
 DO $$
 DECLARE
   rec record;

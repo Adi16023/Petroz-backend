@@ -1767,6 +1767,102 @@ app.get("/api/activity", wrap(async (req, res) => {
 registerFiles(app, { pool, wrap, bad, assertOutlet });
 registerWrites(app, { pool, wrap, bad, assertOutlet });
 
+function ticketDto(row) {
+  return {
+    id: row.id,
+    outletId: row.outlet_id,
+    outletName: row.outlet_name ?? "",
+    number: row.number,
+    category: row.category,
+    message: row.message,
+    reply: row.reply ?? "",
+    status: row.status === "closed" ? "closed" : "open",
+    name: row.name,
+    email: row.email,
+    phone: row.phone,
+    role: row.role,
+    userId: row.user_id,
+    createdBy: row.created_by,
+    createdAt: row.created_at,
+  };
+}
+
+const ticketSelect = `
+  SELECT t.*, o.name AS outlet_name
+  FROM support_tickets t
+  LEFT JOIN outlets o ON o.id = t.outlet_id
+`;
+
+app.get("/api/support-tickets", wrap(async (req, res) => {
+  const mine = req.user.role === "super_admin" ? null : req.user.id;
+  const { rows } = await pool.query(
+    `${ticketSelect}
+     WHERE ($1::uuid IS NULL OR t.user_id = $1 OR t.created_by = $1)
+     ORDER BY t.created_at DESC`,
+    [mine],
+  );
+  res.json(rows.map(ticketDto));
+}));
+
+app.post("/api/support-tickets", wrap(async (req, res) => {
+  const message = String(req.body?.message ?? "").trim();
+  if (!message) throw bad("Write the issue.");
+  const category = String(req.body?.category ?? "").trim();
+  let outletId = req.body?.outletId ? String(req.body.outletId) : null;
+  if (outletId) {
+    if (req.user.role === "attendance") {
+      const found = await pool.query(`SELECT id FROM outlets WHERE id = $1`, [outletId]);
+      if (!found.rows[0]) throw bad("Outlet not found.", 404);
+    } else {
+      const outlet = await assertOutlet(pool, req.user, outletId);
+      outletId = outlet.id;
+    }
+  }
+  const requested = String(req.body?.number ?? "").trim();
+  const { rows: numbers } = await pool.query(
+    `SELECT number FROM support_tickets WHERE number ~* '^PTS-[0-9]+$'`,
+  );
+  const max = numbers.reduce((highest, row) => {
+    const match = String(row.number).match(/^PTS-(\d+)$/i);
+    return match ? Math.max(highest, Number(match[1])) : highest;
+  }, 0);
+  const taken = numbers.some((row) => String(row.number).toLowerCase() === requested.toLowerCase());
+  const number = /^PTS-\d+$/i.test(requested) && !taken ? requested.toUpperCase().replace(/^PTS-/i, "PTS-") : `PTS-${max + 1}`;
+  const { rows } = await pool.query(
+    `INSERT INTO support_tickets (
+       outlet_id, number, category, message, reply, status, name, email, phone, role, user_id, created_by
+     ) VALUES ($1, $2, $3, $4, '', 'open', $5, $6, $7, $8, $9, $9)
+     RETURNING *`,
+    [
+      outletId,
+      number,
+      category,
+      message,
+      String(req.body?.name ?? req.user.name ?? "").trim(),
+      String(req.body?.email ?? req.user.email ?? "").trim(),
+      String(req.body?.phone ?? req.user.phone ?? "").trim(),
+      String(req.body?.role ?? req.user.role ?? "").trim(),
+      req.user.id,
+    ],
+  );
+  const saved = rows[0];
+  const named = await pool.query(`${ticketSelect} WHERE t.id = $1`, [saved.id]);
+  res.status(201).json(ticketDto(named.rows[0] ?? saved));
+}));
+
+app.patch("/api/support-tickets/:id", wrap(async (req, res) => {
+  if (req.user.role !== "super_admin") throw bad("Only a super admin can update a ticket.", 403);
+  const status = req.body?.status === "closed" ? "closed" : "open";
+  const reply = String(req.body?.reply ?? "");
+  const { rows } = await pool.query(
+    `UPDATE support_tickets SET reply = $2, status = $3 WHERE id = $1 RETURNING id`,
+    [req.params.id, reply, status],
+  );
+  if (!rows[0]) throw bad("Ticket not found.", 404);
+  const named = await pool.query(`${ticketSelect} WHERE t.id = $1`, [rows[0].id]);
+  res.json(ticketDto(named.rows[0]));
+}));
+
 app.use((error, _req, res, _next) => {
   const status = error.status || 500;
   if (status === 500) console.error(error);
