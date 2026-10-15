@@ -293,7 +293,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
          FROM equipment e
          LEFT JOIN products pr ON pr.id = e.product_id
          WHERE e.outlet_id = $1 AND e.kind = 'nozzle' AND e.active = true
-           AND (CARDINALITY($2::uuid[]) = 0 OR e.id = ANY($2::uuid[]))
+           AND CARDINALITY($2::uuid[]) > 0 AND e.id = ANY($2::uuid[])
          ORDER BY e.label`,
         [outletId, assignedNozzles],
       ),
