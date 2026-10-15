@@ -1577,10 +1577,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   }
 
   function billLines(body) {
-    const fuels = ["Petrol", "Diesel", "Power"];
     const raw = Array.isArray(body?.lines) ? body.lines : [];
     const lines = raw.map((line) => {
-      const fuel = fuels.includes(line?.fuel) ? line.fuel : "";
+      const fuel = String(line?.fuel ?? "").trim();
       const qty = money(line?.qty);
       const rate = money(line?.rate);
       const discount = money(line?.discount);
