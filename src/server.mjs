@@ -389,6 +389,100 @@ app.put("/api/payment-methods", wrap(async (req, res) => {
   res.json(rows.map(paymentDto));
 }));
 
+function capitalDto(row) {
+  return {
+    id: row.id,
+    outletId: row.outlet_id,
+    kind: row.kind,
+    party: row.party,
+    docDate: String(row.doc_date).slice(0, 10),
+    amount: Number(row.amount),
+    mode: row.mode,
+    note: row.note ?? "",
+    status: row.status ?? "posted",
+    createdBy: row.created_by_name ?? "",
+    createdAt: row.created_at,
+  };
+}
+
+const CAPITAL_KINDS = new Set(["investment", "withdrawal", "loan"]);
+
+app.get("/api/capital", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  const { rows } = await pool.query(
+    `SELECT c.id, c.outlet_id, c.kind, c.party,
+            to_char(c.doc_date, 'YYYY-MM-DD') AS doc_date,
+            c.amount, c.mode, c.note, COALESCE(u.name, '') AS created_by_name, c.created_at
+     FROM capital c
+     LEFT JOIN users u ON u.id = c.created_by
+     WHERE c.outlet_id = $1
+     ORDER BY c.doc_date DESC, c.created_at DESC`,
+    [outlet.id],
+  );
+  res.json(rows.map(capitalDto));
+}));
+
+app.get("/api/transactions", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  const { rows } = await pool.query(
+    `SELECT t.id, t.outlet_id, t.kind, t.party,
+            to_char(t.doc_date, 'YYYY-MM-DD') AS doc_date,
+            t.amount, t.mode, t.note, t.status, COALESCE(u.name, '') AS created_by_name, t.created_at
+     FROM transactions t
+     LEFT JOIN users u ON u.id = t.created_by
+     WHERE t.outlet_id = $1
+     ORDER BY t.doc_date DESC, t.created_at DESC`,
+    [outlet.id],
+  );
+  res.json(rows.map(capitalDto));
+}));
+
+app.post("/api/capital", wrap(async (req, res) => {
+  const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+  if (!["owner", "manager", "super_admin", "accounts_auditor"].includes(req.user.role)) {
+    throw bad("Capital entries stay with the bunk desk.", 403);
+  }
+  const kind = String(req.body?.kind ?? "").trim();
+  if (!CAPITAL_KINDS.has(kind)) throw bad("Choose investment, withdrawal, or loan.");
+  const party = String(req.body?.partyName ?? req.body?.party ?? "").trim();
+  if (!party) throw bad("Enter a name.");
+  const amount = Number(String(req.body?.amount ?? "").replace(/[^\d.-]/g, ""));
+  if (!Number.isFinite(amount) || amount <= 0) throw bad("Enter an amount.");
+  const docDate = String(req.body?.docDate ?? req.body?.at ?? "").slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(docDate)) throw bad("Choose a date.");
+  const mode = String(req.body?.mode ?? "cash").toLowerCase() === "bank" ? "bank" : "cash";
+  const note = String(req.body?.note ?? "").trim();
+  const rounded = Math.round(amount * 100) / 100;
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const capital = await client.query(
+      `INSERT INTO capital (outlet_id, kind, party, doc_date, amount, mode, note, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+       RETURNING id, outlet_id, kind, party, to_char(doc_date, 'YYYY-MM-DD') AS doc_date, amount, mode, note, created_at`,
+      [outlet.id, kind, party, docDate, rounded, mode, note || null, req.user.id],
+    );
+    const posted = await client.query(
+      `INSERT INTO transactions (outlet_id, capital_id, kind, party, doc_date, amount, mode, note, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING id`,
+      [outlet.id, capital.rows[0].id, kind, party, docDate, rounded, mode, note || null, req.user.id],
+    );
+    await client.query(
+      `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+       VALUES ($1, $2, $3, $4, 'capital', $5)`,
+      [outlet.id, req.user.id, `Recorded ${kind}`, `${party} · ₹${rounded}`, capital.rows[0].id],
+    );
+    await client.query("COMMIT");
+    res.status(201).json({ ...capitalDto({ ...capital.rows[0], created_by_name: req.user.name ?? "" }), transactionId: posted.rows[0].id });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
+}));
+
 app.get("/api/vendors", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const { rows } = await pool.query(

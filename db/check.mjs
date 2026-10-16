@@ -20,6 +20,8 @@ const expected = [
   "settings",
   "shifts",
   "support_tickets",
+  "capital",
+  "transactions",
   "users",
 ];
 

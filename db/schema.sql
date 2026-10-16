@@ -1,7 +1,7 @@
 -- Petroz dealer desk. Tables match the screens that are on:
 -- Dashboard, DSR, Shifts, Sales, Dip, Stock, Lube / Products,
 -- Credit customers, Staff, Attendance, Purchases, Expenses,
--- Banking, Exports, Activity log, Settings.
+-- Banking, Exports, Activity log, Settings, Capital.
 --
 -- users.outlet_id is the one pump that person belongs to.
 -- NULL means every outlet under that settings row (owner, auditor, a shared supplier).
@@ -10,6 +10,7 @@
 -- purchases and purchase_items are fuel and shop buying, including purchase orders.
 -- banking is deposits, supplier transfers, and card or wallet settlements.
 -- expenses is day-to-day costs and recurring bills.
+-- capital is owner investment, withdrawal, and loan. transactions is the posted line for each of those.
 -- documents is what is left: quotes, orders, credit receipts, salary, adjustments, and a locked DSR.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -707,6 +708,72 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 
 CREATE UNIQUE INDEX IF NOT EXISTS support_tickets_number_idx ON support_tickets (number);
 CREATE INDEX IF NOT EXISTS support_tickets_created_idx ON support_tickets (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS capital (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  kind text NOT NULL,
+  party text NOT NULL,
+  doc_date date NOT NULL DEFAULT CURRENT_DATE,
+  amount numeric(14, 2) NOT NULL,
+  mode text NOT NULL DEFAULT 'cash',
+  note text,
+  created_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (kind IN ('investment', 'withdrawal', 'loan')),
+  CHECK (mode IN ('cash', 'bank')),
+  CHECK (amount > 0)
+);
+
+CREATE INDEX IF NOT EXISTS capital_outlet_idx ON capital (outlet_id, doc_date DESC);
+
+CREATE TABLE IF NOT EXISTS transactions (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets (id),
+  capital_id uuid REFERENCES capital (id),
+  kind text NOT NULL,
+  party text NOT NULL,
+  doc_date date NOT NULL DEFAULT CURRENT_DATE,
+  amount numeric(14, 2) NOT NULL,
+  mode text NOT NULL DEFAULT 'cash',
+  note text,
+  status text NOT NULL DEFAULT 'posted',
+  created_by uuid REFERENCES users (id),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (kind IN ('investment', 'withdrawal', 'loan')),
+  CHECK (mode IN ('cash', 'bank')),
+  CHECK (status IN ('posted', 'reversed')),
+  CHECK (amount > 0)
+);
+
+CREATE INDEX IF NOT EXISTS transactions_outlet_idx ON transactions (outlet_id, doc_date DESC);
+CREATE INDEX IF NOT EXISTS transactions_capital_idx ON transactions (capital_id);
+
+INSERT INTO capital (id, outlet_id, kind, party, doc_date, amount, mode, note, created_by, created_at)
+SELECT d.id,
+       d.outlet_id,
+       CASE d.category
+         WHEN 'capital_withdrawal' THEN 'withdrawal'
+         WHEN 'capital_loan' THEN 'loan'
+         ELSE 'investment'
+       END,
+       COALESCE(NULLIF(u.name, ''), 'Owner'),
+       d.doc_date,
+       d.net,
+       CASE WHEN d.mode::text = 'bank' THEN 'bank' ELSE 'cash' END,
+       d.note,
+       d.created_by,
+       d.created_at
+FROM documents d
+LEFT JOIN users u ON u.id = d.user_id
+WHERE d.category IN ('capital_investment', 'capital_withdrawal', 'capital_loan')
+  AND d.net > 0
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO transactions (outlet_id, capital_id, kind, party, doc_date, amount, mode, note, status, created_by, created_at)
+SELECT c.outlet_id, c.id, c.kind, c.party, c.doc_date, c.amount, c.mode, c.note, 'posted', c.created_by, c.created_at
+FROM capital c
+WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.capital_id = c.id);
 
 DO $$
 DECLARE
