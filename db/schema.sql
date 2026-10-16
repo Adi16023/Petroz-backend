@@ -11,6 +11,7 @@
 -- banking is deposits, supplier transfers, and card or wallet settlements.
 -- expenses is day-to-day costs and recurring bills.
 -- capital is owner investment, withdrawal, and loan. transactions is the posted line for each of those.
+-- capital is owner investment, withdrawal, and loan. transactions is the posted line for each of those.
 -- documents is what is left: quotes, orders, credit receipts, salary, adjustments, and a locked DSR.
 
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
@@ -708,7 +709,6 @@ CREATE TABLE IF NOT EXISTS support_tickets (
 
 CREATE UNIQUE INDEX IF NOT EXISTS support_tickets_number_idx ON support_tickets (number);
 CREATE INDEX IF NOT EXISTS support_tickets_created_idx ON support_tickets (created_at DESC);
-
 CREATE TABLE IF NOT EXISTS capital (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   outlet_id uuid NOT NULL REFERENCES outlets (id),
@@ -774,6 +774,7 @@ INSERT INTO transactions (outlet_id, capital_id, kind, party, doc_date, amount, 
 SELECT c.outlet_id, c.id, c.kind, c.party, c.doc_date, c.amount, c.mode, c.note, 'posted', c.created_by, c.created_at
 FROM capital c
 WHERE NOT EXISTS (SELECT 1 FROM transactions t WHERE t.capital_id = c.id);
+
 
 DO $$
 DECLARE
