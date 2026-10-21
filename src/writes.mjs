@@ -407,6 +407,89 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     }
   }));
 
+  app.put("/api/cash-drawer-count", wrap(async (req, res) => {
+    if (!["owner", "manager", "super_admin"].includes(req.user.role)) {
+      throw bad("Only the dealer can update drawer denominations.", 403);
+    }
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    const docDate = String(req.body?.date ?? "").slice(0, 10);
+    const parsedDate = new Date(`${docDate}T00:00:00.000Z`);
+    if (
+      !/^\d{4}-\d{2}-\d{2}$/.test(docDate) ||
+      !Number.isFinite(parsedDate.getTime()) ||
+      parsedDate.toISOString().slice(0, 10) !== docDate
+    ) {
+      throw bad("Choose a valid drawer count date.");
+    }
+    const source = req.body?.counts && typeof req.body.counts === "object" && !Array.isArray(req.body.counts)
+      ? req.body.counts
+      : {};
+    const counts = {};
+    let amount = 0;
+    for (const denomination of [10, 20, 50, 100, 200, 500]) {
+      const value = source[String(denomination)];
+      const quantity = value == null || value === "" ? 0 : Number(value);
+      if (!Number.isInteger(quantity) || quantity < 0 || quantity > 100000) {
+        throw bad(`Enter a valid quantity for ₹${denomination}.`);
+      }
+      counts[String(denomination)] = quantity;
+      amount += denomination * quantity;
+    }
+    const coins = source.coins == null || source.coins === "" ? 0 : Number(source.coins);
+    if (!Number.isFinite(coins) || coins < 0) throw bad("Enter a valid amount for coins.");
+    counts.coins = round2(coins);
+    amount = round2(amount + counts.coins);
+    const note = JSON.stringify(counts);
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        `SELECT pg_advisory_xact_lock(hashtext($1), hashtext($2))`,
+        [outlet.id, docDate],
+      );
+      const existing = await client.query(
+        `SELECT id FROM documents
+         WHERE outlet_id = $1 AND kind = 'adjustment'
+           AND category = 'drawer_cash_count' AND doc_date = $2
+         ORDER BY created_at DESC
+         LIMIT 1
+         FOR UPDATE`,
+        [outlet.id, docDate],
+      );
+      let id;
+      if (existing.rows[0]) {
+        id = existing.rows[0].id;
+        await client.query(
+          `UPDATE documents
+           SET amount = $2, net = $2, note = $3, created_by = $4
+           WHERE id = $1`,
+          [id, amount, note, req.user.id],
+        );
+      } else {
+        const inserted = await client.query(
+          `INSERT INTO documents (
+             outlet_id, kind, status, doc_date, amount, net, mode, category, note, created_by
+           ) VALUES ($1, 'adjustment', 'approved', $2, $3, $3, 'cash', 'drawer_cash_count', $4, $5)
+           RETURNING id`,
+          [outlet.id, docDate, amount, note, req.user.id],
+        );
+        id = inserted.rows[0].id;
+      }
+      await client.query(
+        `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+         VALUES ($1, $2, 'updated', $3, 'documents', $4)`,
+        [outlet.id, req.user.id, `Drawer count for ${docDate}`, id],
+      );
+      await client.query("COMMIT");
+      res.json({ id, date: docDate, amount, counts });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
+  }));
+
   app.patch("/api/documents/:id", wrap(async (req, res) => {
     const status = req.body?.status;
     if (status && !STATUSES.includes(status)) throw bad("Unknown status.");
