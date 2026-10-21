@@ -195,6 +195,22 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       "transfer", "settlement", "expense", "expense_schedule", "salary", "adjustment", "dsr",
     ];
     if (!allowed.includes(kind)) throw bad("Unknown document kind.");
+    const isOpeningCash = kind === "adjustment" && req.body?.category === "opening_cash";
+    if (isOpeningCash && !["owner", "manager", "super_admin"].includes(req.user.role)) {
+      throw bad("Only the dealer can add opening cash.", 403);
+    }
+    if (isOpeningCash) {
+      const docDate = String(req.body?.docDate ?? "").slice(0, 10);
+      const parsedDate = new Date(`${docDate}T00:00:00.000Z`);
+      if (
+        !/^\d{4}-\d{2}-\d{2}$/.test(docDate) ||
+        !Number.isFinite(parsedDate.getTime()) ||
+        parsedDate.toISOString().slice(0, 10) !== docDate
+      ) {
+        throw bad("Choose a valid opening cash date.");
+      }
+      if (money(req.body?.amount) <= 0) throw bad("Enter an opening cash amount greater than zero.");
+    }
     let status = req.body?.status && STATUSES.includes(req.body.status) ? req.body.status : "open";
     const isAdvance = kind === "payment" && req.body?.category === "advance";
     if (kind === "expense" || isAdvance) {
@@ -203,7 +219,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     }
     const amount = money(req.body?.amount);
     const charges = money(req.body?.charges);
-    const net = req.body?.net == null || req.body?.net === "" ? amount : money(req.body.net);
+    const net = isOpeningCash ? amount : req.body?.net == null || req.body?.net === "" ? amount : money(req.body.net);
     const mode = payMode(req.body?.mode);
     const userId = await partyId(req.user, outlet.id, req.body?.partyName, req.body?.partyId);
     const lines = Array.isArray(req.body?.lines) ? req.body.lines : [];
@@ -400,6 +416,15 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       const row = found.rows[0];
       if (!row) continue;
       await assertOutlet(pool, req.user, row.outlet_id);
+      if (table === "documents") {
+        const document = await pool.query(
+          `SELECT 1 FROM documents WHERE id = $1 AND kind = 'adjustment' AND category = 'opening_cash'`,
+          [row.id],
+        );
+        if (document.rows.length && !["owner", "manager", "super_admin"].includes(req.user.role)) {
+          throw bad("Only the dealer can edit opening cash.", 403);
+        }
+      }
       if (table === "purchases" && req.body?.line) {
         const sets = [];
         const params = [row.id];
@@ -560,6 +585,15 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       const row = found.rows[0];
       if (!row) continue;
       await assertOutlet(pool, req.user, row.outlet_id);
+      if (table === "documents") {
+        const document = await pool.query(
+          `SELECT 1 FROM documents WHERE id = $1 AND kind = 'adjustment' AND category = 'opening_cash'`,
+          [row.id],
+        );
+        if (document.rows.length && !["owner", "manager", "super_admin"].includes(req.user.role)) {
+          throw bad("Only the dealer can delete opening cash.", 403);
+        }
+      }
       if (child) await pool.query(`DELETE FROM ${child} WHERE ${fk} = $1`, [row.id]);
       await pool.query(`DELETE FROM ${table} WHERE id = $1`, [row.id]);
       await log(req.user, row.outlet_id, "deleted", reason, table, row.id);
