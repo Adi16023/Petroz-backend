@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { assertCashierIds, assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
 import { registerWrites } from "./writes.mjs";
+import { shiftReadingQty } from "./shift-readings.mjs";
 
 const outlet = { id: "00000000-0000-4000-8000-000000000001", settings_id: "00000000-0000-4000-8000-000000000002" };
 const cashierId = "00000000-0000-4000-8000-000000000003";
@@ -13,7 +14,7 @@ const nozzleId = "00000000-0000-4000-8000-000000000008";
 const user = { id: dealerId, role: "owner", settings_id: outlet.settings_id };
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [] } = {}) {
+function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [] } = {}) {
   const calls = [];
   const shift = {
     id: shiftId, outlet_id: outlet.id, label: "Morning", status: "open",
@@ -41,6 +42,13 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
       return { rows: cashierIds.map((id) => ({ ...shift, cashier_id: id, cashier_name: id === cashierId ? "Ravi" : "Meena" })) };
     }
     if (sql.includes("SELECT e.doc_date, e.category")) return { rows: expenseHistory };
+    if (sql.includes("SELECT e.id, e.label, e.meter")) return { rows: nozzles };
+    if (sql.includes("SELECT equipment_id, kind, qty FROM dip_readings")) return { rows: readings };
+    if (sql.includes("SELECT r.equipment_id, r.qty")) {
+      assert.match(sql, /r.kind = 'closing'/);
+      return { rows: priorReadings };
+    }
+    if (sql.includes("SELECT e.id, e.product_id, pr.name")) return { rows: nozzles };
     if (sql.includes("INSERT INTO shifts")) return { rows: [{ id: shiftId }] };
     if (sql.includes("RETURNING id")) return { rows: [{ id: docId }] };
     return { rows: [] };
@@ -228,4 +236,63 @@ test("historical shifts are explicitly unassigned and standalone records stay un
   assert.equal(docs[1].handledBy, "Unassigned cashier");
   const other = await withDocumentCashiers(harness().pool, [{ shiftId, outletId: "another-outlet" }]);
   assert.equal(other[0].handledBy, "Unassigned cashier");
+});
+
+test("shift entry persists the actual opening and closing values separately", async () => {
+  const h = harness({ nozzles: [{ id: nozzleId, product_id: null }] });
+  await h.request("put /api/shifts/:id/entry", {
+    pumps: [{ equipmentId: nozzleId, opening: 12000, closing: 12450, rate: 0 }],
+  });
+  const insert = h.calls.find(({ sql }) => sql.includes("INSERT INTO dip_readings (shift_id"));
+  assert.deepEqual(insert.params.slice(3), [12000, 12450]);
+});
+
+test("opening correction uses only that shift's saved meters and never changes a closing or dip", () => {
+  const entry = { meters: { [nozzleId]: 12000 } };
+  assert.equal(shiftReadingQty({ equipment_id: nozzleId, kind: "opening", qty: 12450 }, entry), 12000);
+  assert.equal(shiftReadingQty({ equipment_id: nozzleId, kind: "closing", qty: 12450 }, entry), 12450);
+  assert.equal(shiftReadingQty({ equipment_id: nozzleId, kind: "dip", qty: 12450 }, entry), 12450);
+  assert.equal(shiftReadingQty({ equipment_id: nozzleId, kind: "opening", qty: 12450 }, {}), 12450);
+  assert.equal(shiftReadingQty({ equipment_id: nozzleId, kind: "opening", qty: 12450 }, { meters: { [nozzleId]: 0 } }), 0);
+});
+
+test("existing shift entry uses its own saved opening and actual closing instead of a later nozzle meter", async () => {
+  const h = harness({
+    nozzles: [{ id: nozzleId, label: "Pump 1", meter: 99999 }],
+    readings: [
+      { equipment_id: nozzleId, kind: "opening", qty: 12450 },
+      { equipment_id: nozzleId, kind: "closing", qty: 12450 },
+    ],
+    priorReadings: [{ equipment_id: nozzleId, qty: 11800 }],
+  });
+  h.shift.entry.meters = { [nozzleId]: 12000 };
+  const response = await h.request("get /api/shifts/:id/entry");
+  assert.equal(response.body.nozzles[0].opening, 12000);
+  assert.equal(response.body.nozzles[0].closing, 12450);
+  assert.equal(response.body.nozzles[0].qty, 450);
+});
+
+test("new shifts carry the previous shift closing, not its opening", async () => {
+  const h = harness({
+    nozzles: [{ id: nozzleId, label: "Pump 1", meter: 99999 }],
+    priorReadings: [{ equipment_id: nozzleId, qty: 12450 }],
+  });
+  const response = await h.request("get /api/shifts/:id/entry");
+  assert.equal(response.body.nozzles[0].opening, 12450);
+  assert.equal(response.body.nozzles[0].closing, 12450);
+  assert.equal(response.body.nozzles[0].qty, 0);
+});
+
+test("a shift's explicit readings remain authoritative without saved entry meters", async () => {
+  const h = harness({
+    nozzles: [{ id: nozzleId, label: "Pump 1", meter: 99999 }],
+    readings: [
+      { equipment_id: nozzleId, kind: "opening", qty: 12000 },
+      { equipment_id: nozzleId, kind: "closing", qty: 12450 },
+    ],
+    priorReadings: [{ equipment_id: nozzleId, qty: 11800 }],
+  });
+  const response = await h.request("get /api/shifts/:id/entry");
+  assert.equal(response.body.nozzles[0].opening, 12000);
+  assert.equal(response.body.nozzles[0].closing, 12450);
 });

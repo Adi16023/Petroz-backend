@@ -1,4 +1,5 @@
 import { assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
+import { shiftReadingQty } from "./shift-readings.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -301,7 +302,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       ),
       pool.query(
         `SELECT equipment_id, kind, qty FROM dip_readings
-         WHERE shift_id = $1 AND kind IN ('opening', 'closing')`,
+         WHERE shift_id = $1 AND kind IN ('opening', 'closing')
+         ORDER BY at`,
         [shift.id],
       ),
       pool.query(
@@ -321,7 +323,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       pool.query(
         `SELECT r.equipment_id, r.qty
          FROM dip_readings r
-         WHERE r.kind = 'opening'
+         WHERE r.kind = 'closing'
            AND r.shift_id = (
              SELECT id FROM shifts
              WHERE outlet_id = $1 AND id <> $2 AND starts_at < $3
@@ -453,7 +455,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const savedMeters = shift.entry && typeof shift.entry === "object" && shift.entry.meters && typeof shift.entry.meters === "object"
       ? shift.entry.meters
       : {};
-    const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(row.qty)]));
+    const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(shiftReadingQty(row, savedEntry))]));
+    const closing = new Map(readings.rows.filter((row) => row.kind === "closing").map((row) => [row.equipment_id, num(row.qty)]));
     const openingMeters = new Map(openingReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const priorOpen = new Map(priorShiftOpen.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const fuelByNozzle = new Map(fuel.rows.map((row) => [row.equipment_id, row]));
@@ -490,7 +493,6 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         employeeCode: row.employee_code,
       })),
       nozzles: nozzles.rows.map((row) => {
-        const savedOpen = opening.has(row.id);
         const fromPrior = priorOpen.has(row.id) ? priorOpen.get(row.id) ?? 0 : null;
         const baseline = fromPrior != null ? fromPrior : openingMeters.has(row.id) ? openingMeters.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const line = fuelByNozzle.get(row.id);
@@ -503,10 +505,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const priceIsNewer = catalog > 0 && priceAt > latestAt;
         const savedOpening = savedMeters[row.id];
         const savedOpeningNum = savedOpening == null || savedOpening === "" ? null : num(savedOpening);
-        const savedOpenQty = savedOpen ? opening.get(row.id) ?? 0 : null;
-        const untouched = savedOpenQty == null || (savedOpeningNum != null && savedOpeningNum === savedOpenQty);
-        const openingReading = fromPrior != null && (savedOpeningNum == null || untouched) ? fromPrior : savedOpeningNum ?? baseline;
-        const closingQty = untouched && fromPrior != null ? fromPrior : savedOpenQty ?? openingReading;
+        const openingReading = savedOpeningNum ?? opening.get(row.id) ?? baseline;
+        const closingQty = closing.get(row.id) ?? openingReading;
         const sold = round2(closingQty - openingReading);
         return {
           id: row.id,
@@ -724,7 +724,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         await client.query(
           `INSERT INTO dip_readings (shift_id, equipment_id, user_id, kind, qty)
            VALUES ($1, $2, $3, 'opening'::reading_kind, $4), ($1, $2, $3, 'closing'::reading_kind, $5)`,
-          [shift.id, nozzle.id, req.user.id, closing, closing],
+          [shift.id, nozzle.id, req.user.id, money(row.opening), closing],
         );
         await client.query(`UPDATE equipment SET meter = $2 WHERE id = $1`, [nozzle.id, closing]);
         if (!(sold > 0) && !(amount > 0)) continue;

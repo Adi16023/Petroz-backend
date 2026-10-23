@@ -30,3 +30,7 @@ On an empty database the server creates the tables, then one dealer (Whitefield 
 - Shift-entry expense history exposes `paidBy` for the assigned cashiers and retains `by` as the actual creator. `createdBy`, `partyId`, `decidedBy`, and audit actors are never replaced with a cashier.
 
 Run `npm test` for isolated regression tests; these tests do not connect to a database.
+
+## Shift meter readings
+
+Shift entry stores each nozzle's opening and closing separately. Shift details, reading lists, and reopened entries use that shift's saved values, not the nozzle's current meter. For older entries affected by identical opening/closing rows, reads recover the opening from the shift's saved `entry.meters` when available; no database rewrite is performed. New shifts carry forward the previous shift's closing reading.

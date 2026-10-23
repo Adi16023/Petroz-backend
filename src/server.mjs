@@ -11,6 +11,7 @@ import { promoteDueShifts } from "./shift-entry.mjs";
 import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
 import { withDocumentCashiers } from "./shift-cashiers.mjs";
+import { shiftReadingQty } from "./shift-readings.mjs";
 
 const DOCUMENT_KINDS = [
   "sale",
@@ -1316,7 +1317,7 @@ app.get("/api/shifts/:id", wrap(async (req, res) => {
       kind: row.kind,
       at: row.at,
       mm: num(row.mm),
-      qty: num(row.qty),
+      qty: num(shiftReadingQty(row, shift.entry)),
       bookQty: num(row.book_qty),
       status: row.status,
       remarks: row.remarks,
@@ -1329,7 +1330,7 @@ app.get("/api/readings", wrap(async (req, res) => {
   const kind = req.query.kind || null;
   if (kind && !["opening", "closing", "dip"].includes(kind)) throw bad("Unknown reading kind.");
   const { rows } = await pool.query(
-    `SELECT r.*, e.label AS equipment_label, e.kind AS equipment_kind, u.name AS party_name, s.label AS shift_label
+    `SELECT r.*, e.label AS equipment_label, e.kind AS equipment_kind, u.name AS party_name, s.label AS shift_label, s.entry AS shift_entry
      FROM dip_readings r
      JOIN equipment e ON e.id = r.equipment_id
      LEFT JOIN users u ON u.id = r.user_id
@@ -1352,7 +1353,7 @@ app.get("/api/readings", wrap(async (req, res) => {
     kind: row.kind,
     at: row.at,
     mm: num(row.mm),
-    qty: num(row.qty),
+    qty: num(shiftReadingQty(row, row.shift_entry)),
     bookQty: num(row.book_qty),
     status: row.status,
     remarks: row.remarks,
