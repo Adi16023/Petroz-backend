@@ -1,6 +1,7 @@
 import bcrypt from "bcryptjs";
 import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
+import { assertCashierIds, assertShiftCashiers } from "./shift-cashiers.mjs";
 
 const PAY_MODES = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
 const STAFF_TYPES = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
@@ -227,6 +228,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      if (req.body?.shiftId) await assertShiftCashiers(client, req.body.shiftId, outlet, bad, true);
       let id;
       let table;
       if (kind === "sale") {
@@ -495,10 +497,11 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (status && !STATUSES.includes(status)) throw bad("Unknown status.");
     const tables = ["sales", "purchases", "expenses", "banking", "documents"];
     for (const table of tables) {
-      const found = await pool.query(`SELECT id, outlet_id FROM ${table} WHERE id = $1`, [req.params.id]);
+      const found = await pool.query(`SELECT id, outlet_id, shift_id FROM ${table} WHERE id = $1`, [req.params.id]);
       const row = found.rows[0];
       if (!row) continue;
-      await assertOutlet(pool, req.user, row.outlet_id);
+      const outlet = await assertOutlet(pool, req.user, row.outlet_id);
+      if (row.shift_id) await assertShiftCashiers(pool, row.shift_id, outlet, bad);
       if (table === "documents") {
         const document = await pool.query(
           `SELECT 1 FROM documents WHERE id = $1 AND kind = 'adjustment' AND category = 'opening_cash'`,
@@ -1409,10 +1412,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const startIso = new Date(startMs).toISOString();
     const endIso = new Date(endMs).toISOString();
     const requested = uuidList(req.body?.staffIds);
-    const cashierIds = uuidList(req.body?.cashierIds);
+    const cashierIds = await assertCashierIds(pool, req.body?.cashierIds, outlet, bad);
     const nozzleIds = uuidList(req.body?.nozzleIds);
     if (!requested) throw bad("Pick staff from this outlet.");
-    if (!cashierIds) throw bad("Pick cashiers from this outlet.");
     if (!nozzleIds) throw bad("Pick nozzles from this outlet.");
     if (!requested.length) throw bad("Pick at least one staff.");
     if (!nozzleIds.length) throw bad("Pick at least one nozzle.");
@@ -1447,18 +1449,6 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
             checkedOutAt: null,
           }]
       ));
-    }
-    if (cashierIds.length) {
-      const found = await pool.query(
-        `SELECT id FROM users
-         WHERE id = ANY($1::uuid[])
-           AND settings_id = $2
-           AND staff_type = 'cashier'
-           AND active = true
-           AND (outlet_id IS NULL OR outlet_id = $3)`,
-        [cashierIds, outlet.settings_id, outlet.id],
-      );
-      if (found.rows.length !== cashierIds.length) throw bad("Pick cashiers from this outlet.");
     }
     if (nozzleIds.length) {
       const found = await pool.query(
@@ -1549,6 +1539,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (!shift) throw bad("Shift not found.", 404);
     const outlet = await assertOutlet(pool, req.user, shift.outlet_id);
     const body = req.body ?? {};
+    const validatedCashiers = await assertCashierIds(pool, body.cashierIds !== undefined ? body.cashierIds : shift.entry?.cashierIds, outlet, bad);
     let duties = Array.isArray(shift.duties) ? shift.duties : [];
     if (body.assign?.partyId && Array.isArray(body.assign.nozzleIds)) {
       duties = duties.filter((duty) => duty.userId !== body.assign.partyId);
@@ -1584,8 +1575,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (!staffIds || !staffIds.length) throw bad("Pick at least one staff.");
     }
     if (body.cashierIds !== undefined) {
-      cashierIds = uuidList(body.cashierIds);
-      if (!cashierIds) throw bad("Pick cashiers from this outlet.");
+      cashierIds = validatedCashiers;
     }
     if (body.nozzleIds !== undefined) {
       nozzleIds = uuidList(body.nozzleIds);
@@ -1623,18 +1613,6 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           });
         }
       }
-    }
-    if (cashierIds?.length) {
-      const found = await pool.query(
-        `SELECT id FROM users
-         WHERE id = ANY($1::uuid[])
-           AND settings_id = $2
-           AND staff_type = 'cashier'
-           AND active = true
-           AND (outlet_id IS NULL OR outlet_id = $3)`,
-        [cashierIds, outlet.settings_id, outlet.id],
-      );
-      if (found.rows.length !== cashierIds.length) throw bad("Pick cashiers from this outlet.");
     }
     if (nozzleIds) {
       const found = await pool.query(

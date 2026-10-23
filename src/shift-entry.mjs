@@ -1,3 +1,5 @@
+import { assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function num(value) {
@@ -466,6 +468,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const dutyUsers = dutyIds.length
       ? await pool.query(`SELECT id, name, employee_code FROM users WHERE id = ANY($1::uuid[])`, [dutyIds])
       : { rows: [] };
+    const [attribution] = await withDocumentCashiers(pool, [{ shiftId: shift.id, outletId }]);
 
     return {
       shift: {
@@ -478,6 +481,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         expectedCash: num(shift.expected_cash) ?? 0,
         declaredCash: num(shift.declared_cash),
         entry: shift.entry && typeof shift.entry === "object" ? shift.entry : {},
+        cashierIds: attribution.cashierIds,
+        cashierNames: attribution.cashierNames,
       },
       duties: dutyUsers.rows.map((row) => ({
         id: row.id,
@@ -560,6 +565,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         mode: row.mode || "cash",
         note: row.note,
         by: row.party_name,
+        paidBy: attribution.handledBy,
       })),
       products: products.rows.map((row) => ({
         id: row.id,
@@ -618,9 +624,6 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       meters[id] = money(row.opening);
     }
     const entry = { ...entryOf(req.body), meters };
-    const kept = shift.entry && typeof shift.entry === "object" ? shift.entry : {};
-    if (Array.isArray(kept.cashierIds)) entry.cashierIds = kept.cashierIds;
-    if (Array.isArray(kept.nozzleIds)) entry.nozzleIds = kept.nozzleIds;
     const lubes = Array.isArray(req.body?.lubes) ? req.body.lubes : [];
     const payments = Array.isArray(req.body?.payments) ? req.body.payments : [];
     const expenses = Array.isArray(req.body?.expenses) ? req.body.expenses : [];
@@ -634,6 +637,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      const currentShift = await assertShiftCashiers(client, shift.id, outlet, bad, true);
+      entry.cashierIds = currentShift.entry.cashierIds;
+      if (Array.isArray(currentShift.entry.nozzleIds)) entry.nozzleIds = currentShift.entry.nozzleIds;
       const owned = await client.query(
         `SELECT l.qty, l.product_id, pr.kind
          FROM sale_items l

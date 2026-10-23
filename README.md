@@ -20,3 +20,13 @@ On an empty database the server creates the tables, then one dealer (Whitefield 
 4. Environment variables: `DATABASE_URL` (Neon pooled URL), `JWT_SECRET` (a long random string).
 5. Deploy. Open `https://<service>.onrender.com/health` — it returns `{ "ok": true }`.
 6. `POST https://<service>.onrender.com/api/login` with the owner phone and password. Send the returned token as `Authorization: Bearer <token>` on every other `/api` call.
+
+## Shift cashiers
+
+- Creating or updating a shift requires at least one active cashier (`staff_type = cashier`, staff/manager role) from the outlet's dealer and outlet. Dealer-wide cashiers with no outlet restriction are allowed.
+- Shift-linked document creation/updates and shift-entry saves reject missing, inactive, non-cashier, or cross-outlet assignments. An existing shift without cashiers must be edited to assign them before entry or closing.
+- Shift-entry saves preserve the stored cashier assignments, not cashier IDs supplied in the entry payload. New shift-linked documents and entry saves validate the shift inside their database transaction before changing transactions or stock.
+- Document list/detail responses include `cashierIds`, `cashierNames`, and `handledBy` for shift-linked records. All assigned cashiers are included; historical shifts with no assignment return `handledBy: "Unassigned cashier"`. Standalone documents retain their original shape.
+- Shift-entry expense history exposes `paidBy` for the assigned cashiers and retains `by` as the actual creator. `createdBy`, `partyId`, `decidedBy`, and audit actors are never replaced with a cashier.
+
+Run `npm test` for isolated regression tests; these tests do not connect to a database.

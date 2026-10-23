@@ -10,6 +10,7 @@ import { ensureAttendanceUser, ensureSeed, ensureSuperAdmin } from "./seed.mjs";
 import { promoteDueShifts } from "./shift-entry.mjs";
 import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
+import { withDocumentCashiers } from "./shift-cashiers.mjs";
 
 const DOCUMENT_KINDS = [
   "sale",
@@ -1768,7 +1769,7 @@ app.get("/api/documents", wrap(async (req, res) => {
     })),
   ];
   rows.sort((a, b) => String(b.docDate).localeCompare(String(a.docDate)) || String(b.createdAt).localeCompare(String(a.createdAt)));
-  res.json(rows);
+  res.json(await withDocumentCashiers(pool, rows));
 }));
 
 app.get("/api/documents/:id", wrap(async (req, res) => {
@@ -1799,7 +1800,8 @@ app.get("/api/documents/:id", wrap(async (req, res) => {
   }
   if (!row) throw bad("Document not found.", 404);
   await assertOutlet(pool, req.user, row.outletId);
-  res.json(row);
+  const [document] = await withDocumentCashiers(pool, [row]);
+  res.json(document);
 }));
 
 app.get("/api/attendance", wrap(async (req, res) => {
