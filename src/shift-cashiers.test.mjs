@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { assertCashierIds, assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
 import { registerWrites } from "./writes.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
+import { syncDeskEquipment } from "./desk-equipment.mjs";
 
 const outlet = { id: "00000000-0000-4000-8000-000000000001", settings_id: "00000000-0000-4000-8000-000000000002" };
 const cashierId = "00000000-0000-4000-8000-000000000003";
@@ -24,6 +25,7 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
   const query = async (sql, params = []) => {
     calls.push({ sql, params });
     if (sql.includes("SELECT * FROM shifts")) return { rows: missingShift ? [] : [shift] };
+    if (sql.includes("SELECT id, name, kind FROM products")) return { rows: [{ id: docId, name: "Petrol", kind: "fuel" }] };
     if (sql.includes("SELECT id, name FROM users")) {
       assert.match(sql, /settings_id = \$2/);
       assert.match(sql, /role IN \('staff', 'manager'\)/);
@@ -439,4 +441,33 @@ test("both close paths timestamp actual closure and preserve the timestamp on cl
   await entry.request("put /api/shifts/:id/entry", { submit: true });
   const submit = entry.calls.find(({ sql }) => sql.includes("closed_at = CASE"));
   assert.match(submit.sql, /WHEN status <> 'closed' THEN clock_timestamp\(\) ELSE closed_at END/);
+});
+
+test("saving a fuel rate updates matching fuel records used by nozzles without changing closed shifts", async () => {
+  const h = harness();
+  await h.request("patch /api/products/:id", { outletId: outlet.id, sellingPrice: 140 });
+  const update = h.calls.find(({ sql }) => sql.includes("UPDATE products SET selling_price = $3"));
+  assert.deepEqual(update.params, [outlet.settings_id, ["petrol", "ms", "petrol / ms", "petrol (ms)"], 140]);
+  assert.match(update.sql, /kind = 'fuel'/);
+  assert.equal(h.calls.some(({ sql }) => /UPDATE (shifts|sale_items|sales)/.test(sql)), false);
+});
+
+test("saving pumps reuses the existing fuel product instead of creating or zeroing a shadow product", async () => {
+  const calls = [];
+  const db = { query: async (sql, params) => {
+    calls.push({ sql, params });
+    if (sql.includes("SELECT id FROM products")) return { rows: [{ id: docId }] };
+    if (sql.includes("RETURNING id")) return { rows: [{ id: nozzleId }] };
+    return { rows: [] };
+  } };
+  await syncDeskEquipment(db, {
+    settingsId: outlet.settings_id, outletId: outlet.id,
+    desk: { pumps: [{ id: "pump", name: "P1", nozzles: [{ fuel: "Petrol", on: true }] }] },
+    scope: { fuels: false, tanks: false, pumps: true },
+  });
+  assert.equal(calls.some(({ sql }) => sql.includes("INSERT INTO products")), false);
+  const nozzle = calls.find(({ sql }) => sql.includes("INSERT INTO equipment") && sql.includes("'nozzle'"));
+  assert.equal(nozzle.params[2], docId);
+  const lookup = calls.find(({ sql }) => sql.includes("SELECT id FROM products"));
+  assert.deepEqual(lookup.params, [outlet.settings_id, "petrol"]);
 });

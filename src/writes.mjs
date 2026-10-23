@@ -964,7 +964,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   app.patch("/api/products/:id", wrap(async (req, res) => {
     const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
     const product = await pool.query(
-      `SELECT id FROM products WHERE id = $1 AND settings_id = $2`,
+      `SELECT id, name, kind FROM products WHERE id = $1 AND settings_id = $2`,
       [req.params.id, outlet.settings_id],
     );
     if (!product.rows[0]) throw bad("Product not found.", 404);
@@ -997,6 +997,19 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         body.active !== false,
       ],
     );
+    if (product.rows[0].kind === "fuel" && Object.prototype.hasOwnProperty.call(body, "sellingPrice")) {
+      const fuelName = (name || product.rows[0].name).trim().toLowerCase().replace(/\s+/g, " ");
+      const aliases = [
+        ["petrol", "ms", "petrol / ms", "petrol (ms)"],
+        ["diesel", "hsd", "diesel / hsd", "diesel (hsd)"],
+      ].find((group) => group.includes(fuelName)) ?? [fuelName];
+      await pool.query(
+        `UPDATE products SET selling_price = $3, price_at = now()
+         WHERE settings_id = $1 AND kind = 'fuel'
+           AND lower(trim(name)) = ANY($2::text[])`,
+        [outlet.settings_id, aliases, money(body.sellingPrice)],
+      );
+    }
     if (Object.prototype.hasOwnProperty.call(body, "imageKey")) {
       await pool.query(`UPDATE products SET image_key = $2 WHERE id = $1`, [req.params.id, String(body.imageKey ?? "").trim() || null]);
     }

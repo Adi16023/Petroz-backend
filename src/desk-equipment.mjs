@@ -89,6 +89,20 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk, scop
     if (!key || key === "not assigned") return null;
     const known = productByFuel.get(key);
     if (known) return known;
+    const existing = await pool.query(
+      `SELECT id FROM products
+       WHERE settings_id = $1 AND kind = 'fuel' AND active = true
+         AND lower(trim(name)) = $2
+       ORDER BY price_at DESC NULLS LAST, created_at DESC, id
+       LIMIT 1`,
+      [settingsId, key],
+    );
+    if (existing.rows[0]) {
+      const productId = existing.rows[0].id;
+      productByFuel.set(key, productId);
+      keptProducts.push(productId);
+      return productId;
+    }
     const productId = await upsertFuel(pool, settingsId, `fuel-name:${key}`, String(name).trim(), {
       unit: key === "cng" ? "Kg" : "Litre",
       gst: 0,
