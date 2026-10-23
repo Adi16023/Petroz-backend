@@ -1,5 +1,6 @@
 import { assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
+import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -517,7 +518,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           closing: closingQty,
           qty: sold ?? 0,
           test: num(line?.test_qty) ?? 0,
-          rate: priceIsNewer ? catalog : ownRate != null && ownRate > 0 ? ownRate : currentRate,
+          rate: shift.status === "closed" && ownRate != null ? ownRate : priceIsNewer ? catalog : ownRate != null && ownRate > 0 ? ownRate : currentRate,
           recent: recentByNozzle.get(row.id) ?? [],
         };
       }),
@@ -678,7 +679,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
 
       const equipment = nozzleIds.length
         ? await client.query(
-            `SELECT e.id, e.product_id, pr.name AS product_name, pr.kind
+            `SELECT e.id, e.product_id, pr.name AS product_name, pr.kind, pr.selling_price
              FROM equipment e
              LEFT JOIN products pr ON pr.id = e.product_id
              WHERE e.outlet_id = $1 AND e.kind = 'nozzle' AND e.id = ANY($2::uuid[])`,
@@ -712,15 +713,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         }
         const sold = Math.max(0, round2(closing - money(row.opening)));
         const test = Math.min(sold, Math.max(0, money(row.test)));
-        const rate = Math.max(0, money(row.rate));
+        const rate = Math.max(0, money(shift.status === "closed" ? row.rate : nozzle.selling_price ?? row.rate));
         const netQty = Math.max(0, sold - test);
         const amount = round2(netQty * rate);
-        if (rate > 0 && nozzle.product_id) {
-          await client.query(
-            `UPDATE products SET selling_price = $2, price_at = now() WHERE id = $1`,
-            [nozzle.product_id, rate],
-          );
-        }
         await client.query(
           `INSERT INTO dip_readings (shift_id, equipment_id, user_id, kind, qty)
            VALUES ($1, $2, $3, 'opening'::reading_kind, $4), ($1, $2, $3, 'closing'::reading_kind, $5)`,
@@ -908,6 +903,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       entry.creditReceived = creditReceived;
       const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust + creditReceived);
       if (posted) {
+        if (currentShift.status !== "closed") {
+          await refreshShiftFuelRates(client, shift.id, outlet.id, bad);
+        }
         await client.query(
           `UPDATE shifts
            SET entry = $2::jsonb, status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4::uuid, $5::uuid)

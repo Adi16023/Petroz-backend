@@ -2,6 +2,7 @@ import bcrypt from "bcryptjs";
 import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
 import { assertCashierIds, assertShiftCashiers } from "./shift-cashiers.mjs";
+import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
 
 const PAY_MODES = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
 const STAFF_TYPES = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
@@ -1534,129 +1535,144 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   }));
 
   app.patch("/api/shifts/:id", wrap(async (req, res) => {
-    const found = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [req.params.id]);
-    const shift = found.rows[0];
-    if (!shift) throw bad("Shift not found.", 404);
-    const outlet = await assertOutlet(pool, req.user, shift.outlet_id);
+    const client = await pool.connect();
     const body = req.body ?? {};
-    const validatedCashiers = await assertCashierIds(pool, body.cashierIds !== undefined ? body.cashierIds : shift.entry?.cashierIds, outlet, bad);
-    let duties = Array.isArray(shift.duties) ? shift.duties : [];
-    if (body.assign?.partyId && Array.isArray(body.assign.nozzleIds)) {
-      duties = duties.filter((duty) => duty.userId !== body.assign.partyId);
-      for (const nozzleId of body.assign.nozzleIds) {
-        duties.push({
-          id: crypto.randomUUID(),
-          userId: body.assign.partyId,
-          nozzleId,
-          windowStart: body.assign.windowStart || shift.starts_at,
-          windowEnd: body.assign.windowEnd || shift.ends_at,
-          checkedOutAt: null,
-        });
-      }
-    }
-    if (body.checkoutPartyId) {
-      const at = new Date().toISOString();
-      duties = duties.map((duty) => duty.userId === body.checkoutPartyId && !duty.checkedOutAt ? { ...duty, checkedOutAt: at } : duty);
-      await pool.query(
-        `UPDATE attendance SET check_out = now() WHERE user_id = $1 AND outlet_id = $2 AND check_out IS NULL`,
-        [body.checkoutPartyId, shift.outlet_id],
-      );
-    }
-    const status = ["upcoming", "open", "closed"].includes(body.status) ? body.status : shift.status;
-    const label = String(body.label ?? "").trim() || shift.label;
-    const startsAt = body.startsAt ? new Date(body.startsAt).toISOString() : shift.starts_at;
-    const endsAt = body.endsAt ? new Date(body.endsAt).toISOString() : shift.ends_at;
-    if (Date.parse(endsAt) <= Date.parse(startsAt)) throw bad("End must be after the start.");
-    let staffIds = null;
-    let cashierIds = null;
-    let nozzleIds = null;
-    if (body.staffIds !== undefined) {
-      staffIds = uuidList(body.staffIds);
-      if (!staffIds || !staffIds.length) throw bad("Pick at least one staff.");
-    }
-    if (body.cashierIds !== undefined) {
-      cashierIds = validatedCashiers;
-    }
-    if (body.nozzleIds !== undefined) {
-      nozzleIds = uuidList(body.nozzleIds);
-      if (!nozzleIds || !nozzleIds.length) throw bad("Pick at least one nozzle.");
-    }
-    if (staffIds) {
-      const found = await pool.query(
-        `SELECT id FROM users
-         WHERE id = ANY($1::uuid[])
-           AND settings_id = $2
-           AND role IN ('staff', 'manager')
-           AND active = true
-           AND (outlet_id IS NULL OR outlet_id = $3)`,
-        [staffIds, outlet.settings_id, outlet.id],
-      );
-      if (found.rows.length !== staffIds.length) throw bad("Pick staff from this outlet.");
-      const kept = new Map();
-      for (const duty of duties) {
-        if (!staffIds.includes(duty.userId)) continue;
-        kept.set(`${duty.userId}:${duty.nozzleId || ""}`, duty);
-      }
-      const pumps = nozzleIds ?? [...new Set(duties.map((duty) => duty.nozzleId).filter(Boolean))];
-      duties = [];
-      for (const userId of staffIds) {
-        const assigned = pumps.length ? pumps : [null];
-        for (const nozzleId of assigned) {
-          const existing = kept.get(`${userId}:${nozzleId || ""}`) || kept.get(`${userId}:`);
+    let shift;
+    let status;
+    try {
+      await client.query("BEGIN");
+      const found = await client.query(`SELECT * FROM shifts WHERE id = $1 FOR UPDATE`, [req.params.id]);
+      shift = found.rows[0];
+      if (!shift) throw bad("Shift not found.", 404);
+      const outlet = await assertOutlet(client, req.user, shift.outlet_id);
+      const validatedCashiers = await assertCashierIds(client, body.cashierIds !== undefined ? body.cashierIds : shift.entry?.cashierIds, outlet, bad);
+      let duties = Array.isArray(shift.duties) ? shift.duties : [];
+      if (body.assign?.partyId && Array.isArray(body.assign.nozzleIds)) {
+        duties = duties.filter((duty) => duty.userId !== body.assign.partyId);
+        for (const nozzleId of body.assign.nozzleIds) {
           duties.push({
-            id: existing?.id || crypto.randomUUID(),
-            userId,
-            nozzleId: nozzleId || null,
-            windowStart: existing?.windowStart || startsAt,
-            windowEnd: existing?.windowEnd || endsAt,
-            checkedOutAt: existing?.checkedOutAt ?? null,
+            id: crypto.randomUUID(),
+            userId: body.assign.partyId,
+            nozzleId,
+            windowStart: body.assign.windowStart || shift.starts_at,
+            windowEnd: body.assign.windowEnd || shift.ends_at,
+            checkedOutAt: null,
           });
         }
       }
-    }
-    if (nozzleIds) {
-      const found = await pool.query(
-        `SELECT id FROM equipment WHERE id = ANY($1::uuid[]) AND outlet_id = $2 AND kind = 'nozzle'`,
-        [nozzleIds, shift.outlet_id],
+      if (body.checkoutPartyId) {
+        const at = new Date().toISOString();
+        duties = duties.map((duty) => duty.userId === body.checkoutPartyId && !duty.checkedOutAt ? { ...duty, checkedOutAt: at } : duty);
+        await client.query(
+          `UPDATE attendance SET check_out = now() WHERE user_id = $1 AND outlet_id = $2 AND check_out IS NULL`,
+          [body.checkoutPartyId, shift.outlet_id],
+        );
+      }
+      status = ["upcoming", "open", "closed"].includes(body.status) ? body.status : shift.status;
+      const label = String(body.label ?? "").trim() || shift.label;
+      const startsAt = body.startsAt ? new Date(body.startsAt).toISOString() : shift.starts_at;
+      const endsAt = body.endsAt ? new Date(body.endsAt).toISOString() : shift.ends_at;
+      if (Date.parse(endsAt) <= Date.parse(startsAt)) throw bad("End must be after the start.");
+      let staffIds = null;
+      let cashierIds = null;
+      let nozzleIds = null;
+      if (body.staffIds !== undefined) {
+        staffIds = uuidList(body.staffIds);
+        if (!staffIds || !staffIds.length) throw bad("Pick at least one staff.");
+      }
+      if (body.cashierIds !== undefined) {
+        cashierIds = validatedCashiers;
+      }
+      if (body.nozzleIds !== undefined) {
+        nozzleIds = uuidList(body.nozzleIds);
+        if (!nozzleIds || !nozzleIds.length) throw bad("Pick at least one nozzle.");
+      }
+      if (staffIds) {
+        const found = await client.query(
+          `SELECT id FROM users
+           WHERE id = ANY($1::uuid[])
+             AND settings_id = $2
+             AND role IN ('staff', 'manager')
+             AND active = true
+             AND (outlet_id IS NULL OR outlet_id = $3)`,
+          [staffIds, outlet.settings_id, outlet.id],
+        );
+        if (found.rows.length !== staffIds.length) throw bad("Pick staff from this outlet.");
+        const kept = new Map();
+        for (const duty of duties) {
+          if (!staffIds.includes(duty.userId)) continue;
+          kept.set(`${duty.userId}:${duty.nozzleId || ""}`, duty);
+        }
+        const pumps = nozzleIds ?? [...new Set(duties.map((duty) => duty.nozzleId).filter(Boolean))];
+        duties = [];
+        for (const userId of staffIds) {
+          const assigned = pumps.length ? pumps : [null];
+          for (const nozzleId of assigned) {
+            const existing = kept.get(`${userId}:${nozzleId || ""}`) || kept.get(`${userId}:`);
+            duties.push({
+              id: existing?.id || crypto.randomUUID(),
+              userId,
+              nozzleId: nozzleId || null,
+              windowStart: existing?.windowStart || startsAt,
+              windowEnd: existing?.windowEnd || endsAt,
+              checkedOutAt: existing?.checkedOutAt ?? null,
+            });
+          }
+        }
+      }
+      if (nozzleIds) {
+        const found = await client.query(
+          `SELECT id FROM equipment WHERE id = ANY($1::uuid[]) AND outlet_id = $2 AND kind = 'nozzle'`,
+          [nozzleIds, shift.outlet_id],
+        );
+        if (found.rows.length !== nozzleIds.length) throw bad("Pick nozzles from this outlet.");
+        duties = duties.filter((duty) => !duty.nozzleId || nozzleIds.includes(duty.nozzleId));
+      }
+      const entry = shift.entry && typeof shift.entry === "object" && !Array.isArray(shift.entry) ? { ...shift.entry } : {};
+      if (cashierIds) entry.cashierIds = cashierIds;
+      if (nozzleIds) entry.nozzleIds = nozzleIds;
+      const entryPatch = cashierIds || nozzleIds ? entry : null;
+      if (status === "closed" && shift.status !== "closed") {
+        await refreshShiftFuelRates(client, shift.id, shift.outlet_id, bad);
+      }
+      await client.query(
+        `UPDATE shifts SET
+           label = $2,
+           starts_at = $3,
+           ends_at = $4,
+           status = $5::shift_status,
+           declared_cash = COALESCE($6, declared_cash),
+           closed_by = COALESCE($7, closed_by),
+           approved_by = COALESCE($8, approved_by),
+           unlock_reason = COALESCE($9, unlock_reason),
+           investigation = COALESCE($10::investigation_status, investigation),
+           investigation_note = COALESCE($11, investigation_note),
+           duties = $12::jsonb,
+           entry = COALESCE($13::jsonb, entry)
+         WHERE id = $1`,
+        [
+          shift.id,
+          label,
+          startsAt,
+          endsAt,
+          status,
+          body.declaredCash == null ? null : money(body.declaredCash),
+          body.closedBy || null,
+          body.approvedBy || null,
+          body.unlockReason || null,
+          body.investigation && ["open", "proof_requested", "resolved"].includes(body.investigation) ? body.investigation : null,
+          body.investigationNote || null,
+          JSON.stringify(duties),
+          entryPatch ? JSON.stringify(entryPatch) : null,
+        ],
       );
-      if (found.rows.length !== nozzleIds.length) throw bad("Pick nozzles from this outlet.");
-      duties = duties.filter((duty) => !duty.nozzleId || nozzleIds.includes(duty.nozzleId));
+      await client.query("COMMIT");
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
     }
-    const entry = shift.entry && typeof shift.entry === "object" && !Array.isArray(shift.entry) ? { ...shift.entry } : {};
-    if (cashierIds) entry.cashierIds = cashierIds;
-    if (nozzleIds) entry.nozzleIds = nozzleIds;
-    const entryPatch = cashierIds || nozzleIds ? entry : null;
-    await pool.query(
-      `UPDATE shifts SET
-         label = $2,
-         starts_at = $3,
-         ends_at = $4,
-         status = $5::shift_status,
-         declared_cash = COALESCE($6, declared_cash),
-         closed_by = COALESCE($7, closed_by),
-         approved_by = COALESCE($8, approved_by),
-         unlock_reason = COALESCE($9, unlock_reason),
-         investigation = COALESCE($10::investigation_status, investigation),
-         investigation_note = COALESCE($11, investigation_note),
-         duties = $12::jsonb,
-         entry = COALESCE($13::jsonb, entry)
-       WHERE id = $1`,
-      [
-        shift.id,
-        label,
-        startsAt,
-        endsAt,
-        status,
-        body.declaredCash == null ? null : money(body.declaredCash),
-        body.closedBy || null,
-        body.approvedBy || null,
-        body.unlockReason || null,
-        body.investigation && ["open", "proof_requested", "resolved"].includes(body.investigation) ? body.investigation : null,
-        body.investigationNote || null,
-        JSON.stringify(duties),
-        entryPatch ? JSON.stringify(entryPatch) : null,
-      ],
-    );
     await log(req.user, shift.outlet_id, "shift", body.detail || `Shift ${status}`, "shifts", shift.id);
     res.json({ id: shift.id });
   }));

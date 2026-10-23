@@ -14,7 +14,7 @@ const nozzleId = "00000000-0000-4000-8000-000000000008";
 const user = { id: dealerId, role: "owner", settings_id: outlet.settings_id };
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [] } = {}) {
+function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false } = {}) {
   const calls = [];
   const shift = {
     id: shiftId, outlet_id: outlet.id, label: "Morning", status: "open",
@@ -49,6 +49,8 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
       return { rows: priorReadings };
     }
     if (sql.includes("SELECT e.id, e.product_id, pr.name")) return { rows: nozzles };
+    if (sql.includes("SELECT l.equipment_id, l.qty, l.rate")) return { rows: fuelLines };
+    if (sql.includes("SELECT l.id FROM sale_items")) return { rows: invalidFuelRate ? [{ id: docId }] : [] };
     if (sql.includes("INSERT INTO shifts")) return { rows: [{ id: shiftId }] };
     if (sql.includes("RETURNING id")) return { rows: [{ id: docId }] };
     return { rows: [] };
@@ -118,7 +120,7 @@ test("shift editing cannot clear assignments, but can repair a historical shift"
   for (const ids of [[], null, ["invalid"]]) {
     const h = harness();
     await assert.rejects(h.request("patch /api/shifts/:id", { cashierIds: ids }), { status: 400 });
-    assert.equal(h.calls.some(({ sql }) => sql.includes("UPDATE")), false);
+    assert.equal(h.calls.some(({ sql }) => /^\s*UPDATE/.test(sql)), false);
   }
   const legacy = harness({ cashierIds: [] });
   await assert.rejects(legacy.request("patch /api/shifts/:id", { status: "closed" }), /Assign at least one cashier/);
@@ -135,7 +137,7 @@ test("inactive or cross-outlet cashiers are rejected for shift creation, editing
   ]) {
     const h = harness({ validCashiers: false });
     await assert.rejects(h.request(route, body), /Select active cashiers/);
-    assert.equal(h.calls.some(({ sql }) => /INSERT|UPDATE/.test(sql)), false);
+    assert.equal(h.calls.some(({ sql }) => /^\s*(INSERT|UPDATE)/.test(sql)), false);
   }
 });
 
@@ -295,4 +297,61 @@ test("a shift's explicit readings remain authoritative without saved entry meter
   const response = await h.request("get /api/shifts/:id/entry");
   assert.equal(response.body.nozzles[0].opening, 12000);
   assert.equal(response.body.nozzles[0].closing, 12450);
+});
+
+test("closing locks current fuel rates and recalculates lines and sale totals before closing atomically", async () => {
+  const h = harness();
+  await h.request("patch /api/shifts/:id", { status: "closed" });
+  const lock = h.calls.findIndex(({ sql }) => sql.includes("FOR SHARE OF p"));
+  const lines = h.calls.findIndex(({ sql }) => sql.includes("UPDATE sale_items l SET rate"));
+  const totals = h.calls.findIndex(({ sql }) => sql.includes("UPDATE sales s SET amount"));
+  const close = h.calls.findIndex(({ sql }) => sql.includes("UPDATE shifts SET"));
+  const commit = h.calls.findIndex(({ sql }) => sql === "COMMIT");
+  assert.ok(lock > 0 && lines > lock && totals > lines && close > totals && commit > close);
+  assert.match(h.calls[lines].sql, /ROUND\(l.qty \* p.selling_price, 2\)/);
+  assert.match(h.calls[lines].sql, /s.category = 'shift_fuel' AND s.status <> 'cancelled'/);
+  assert.match(h.calls[totals].sql, /net = totals.amount \+ s.tax \+ s.charges/);
+  for (const index of [lock, lines, totals]) assert.deepEqual(h.calls[index].params, [shiftId, outlet.id]);
+});
+
+test("missing or invalid current fuel rates abort closing without committing", async () => {
+  const h = harness({ invalidFuelRate: true });
+  await assert.rejects(h.request("patch /api/shifts/:id", { status: "closed" }), /valid current fuel rate/);
+  assert.ok(h.calls.some(({ sql }) => sql === "ROLLBACK"));
+  assert.equal(h.calls.some(({ sql }) => sql.includes("UPDATE shifts SET") || sql === "COMMIT"), false);
+});
+
+test("editing or approving a closed shift does not reprice it at later rates", async () => {
+  for (const status of ["open", "closed"]) {
+    const h = harness();
+    h.shift.status = status;
+    await h.request("patch /api/shifts/:id", status === "closed" ? { status: "closed" } : { label: "Evening" });
+    assert.equal(h.calls.some(({ sql }) => sql.includes("UPDATE sale_items l SET rate")), false);
+  }
+});
+
+test("stale entry rates cannot overwrite current product prices, including during direct submit", async () => {
+  for (const submit of [false, true]) {
+    const h = harness({ nozzles: [{ id: nozzleId, product_id: docId, kind: "fuel", selling_price: "105.50" }] });
+    await h.request("put /api/shifts/:id/entry", {
+      submit,
+      pumps: [{ equipmentId: nozzleId, opening: 1000, closing: 1100, test: 2, rate: 95 }],
+    });
+    const line = h.calls.find(({ sql }) => sql.includes("INSERT INTO sale_items (sale_id, product_id, equipment_id"));
+    assert.equal(line.params[4], 98);
+    assert.equal(line.params[5], 105.5);
+    assert.equal(line.params[6], 10339);
+    assert.equal(h.calls.some(({ sql }) => sql.includes("UPDATE products SET selling_price")), false);
+    assert.equal(h.calls.some(({ sql }) => sql.includes("FOR SHARE OF p")), submit);
+  }
+});
+
+test("closed shift entry displays its saved rate even after catalog prices change", async () => {
+  const h = harness({
+    nozzles: [{ id: nozzleId, selling_price: 120, price_at: "2026-10-24T00:00:00Z" }],
+    fuelLines: [{ equipment_id: nozzleId, qty: 100, rate: 105.5, test_qty: 0 }],
+  });
+  h.shift.status = "closed";
+  const response = await h.request("get /api/shifts/:id/entry");
+  assert.equal(response.body.nozzles[0].rate, 105.5);
 });
