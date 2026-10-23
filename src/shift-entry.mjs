@@ -259,7 +259,7 @@ export async function promoteDueShifts(pool, outletId) {
      SET status = CASE
        WHEN starts_at <= now() THEN 'open'::shift_status
        ELSE 'upcoming'::shift_status
-     END
+     END, closed_at = NULL
      WHERE status = 'closed'
        AND closed_by IS NULL
        AND ($1::uuid IS NULL OR outlet_id = $1)`,
@@ -291,7 +291,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         ...duties.map((duty) => duty.nozzleId),
       ].map((id) => uuidOrNull(id)).filter(Boolean),
     )];
-    const [nozzles, readings, openingReadings, priorShiftOpen, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent, creditPeople, tempPeople, shiftCredits, latestFuel] = await Promise.all([
+    const [nozzles, readings, openingReadings, lastClosedReadings, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent, creditPeople, tempPeople, shiftCredits] = await Promise.all([
       pool.query(
         `SELECT e.id, e.label, e.meter, e.product_id, pr.name AS product_name, pr.unit, pr.selling_price, pr.price_at
          FROM equipment e
@@ -311,27 +311,21 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         `SELECT DISTINCT ON (equipment_id) equipment_id, qty
          FROM dip_readings
          WHERE kind = 'closing'
+           AND shift_id IS NULL
            AND equipment_id IN (
              SELECT id FROM equipment WHERE outlet_id = $1 AND kind = 'nozzle'
            )
-           AND (
-             (at < $2 AND COALESCE(remarks, '') <> 'previous closing')
-             OR remarks = 'previous closing'
-           )
          ORDER BY equipment_id, at DESC`,
-        [outletId, shift.starts_at],
+        [outletId],
       ),
       pool.query(
-        `SELECT r.equipment_id, r.qty
+        `SELECT DISTINCT ON (r.equipment_id) r.equipment_id, r.qty
          FROM dip_readings r
+         JOIN shifts s ON s.id = r.shift_id
          WHERE r.kind = 'closing'
-           AND r.shift_id = (
-             SELECT id FROM shifts
-             WHERE outlet_id = $1 AND id <> $2 AND starts_at < $3
-             ORDER BY starts_at DESC
-             LIMIT 1
-           )`,
-        [outletId, shift.id, shift.starts_at],
+           AND s.outlet_id = $1 AND s.id <> $2 AND s.status = 'closed'
+         ORDER BY r.equipment_id, s.closed_at DESC NULLS LAST, r.at DESC, s.id DESC`,
+        [outletId, shift.id],
       ),
       pool.query(
         `SELECT l.equipment_id, l.qty, l.rate, l.test_qty
@@ -443,14 +437,6 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
          ORDER BY s.created_at`,
         [shift.id],
       ),
-      pool.query(
-        `SELECT DISTINCT ON (l.product_id) l.product_id, l.rate, s.created_at
-         FROM sale_items l
-         JOIN sales s ON s.id = l.sale_id
-         WHERE s.outlet_id = $1 AND s.category = 'shift_fuel' AND s.status <> 'cancelled' AND l.rate > 0
-         ORDER BY l.product_id, s.created_at DESC`,
-        [outletId],
-      ),
     ]);
 
     const savedMeters = shift.entry && typeof shift.entry === "object" && shift.entry.meters && typeof shift.entry.meters === "object"
@@ -459,9 +445,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(shiftReadingQty(row, savedEntry))]));
     const closing = new Map(readings.rows.filter((row) => row.kind === "closing").map((row) => [row.equipment_id, num(row.qty)]));
     const openingMeters = new Map(openingReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
-    const priorOpen = new Map(priorShiftOpen.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
+    const lastClosed = new Map(lastClosedReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const fuelByNozzle = new Map(fuel.rows.map((row) => [row.equipment_id, row]));
-    const latestByProduct = new Map(latestFuel.rows.map((row) => [row.product_id, { rate: num(row.rate) ?? 0, at: row.created_at }]));
     const recentByNozzle = new Map();
     for (const row of recent.rows) {
       const list = recentByNozzle.get(row.equipment_id) ?? [];
@@ -494,16 +479,11 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         employeeCode: row.employee_code,
       })),
       nozzles: nozzles.rows.map((row) => {
-        const fromPrior = priorOpen.has(row.id) ? priorOpen.get(row.id) ?? 0 : null;
+        const fromPrior = lastClosed.has(row.id) ? lastClosed.get(row.id) ?? 0 : null;
         const baseline = fromPrior != null ? fromPrior : openingMeters.has(row.id) ? openingMeters.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const line = fuelByNozzle.get(row.id);
-        const ownRate = line ? num(line.rate) : null;
+        const ownRate = num(savedEntry.fuelRates?.[row.id]) ?? (line ? num(line.rate) : null);
         const catalog = num(row.selling_price) ?? 0;
-        const priceAt = row.price_at ? new Date(row.price_at).getTime() : 0;
-        const latest = row.product_id ? latestByProduct.get(row.product_id) : null;
-        const latestAt = latest?.at ? new Date(latest.at).getTime() : 0;
-        const currentRate = latest && latest.rate > 0 && latestAt >= priceAt ? latest.rate : catalog || latest?.rate || 0;
-        const priceIsNewer = catalog > 0 && priceAt > latestAt;
         const savedOpening = savedMeters[row.id];
         const savedOpeningNum = savedOpening == null || savedOpening === "" ? null : num(savedOpening);
         const openingReading = savedOpeningNum ?? opening.get(row.id) ?? baseline;
@@ -518,7 +498,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           closing: closingQty,
           qty: sold ?? 0,
           test: num(line?.test_qty) ?? 0,
-          rate: shift.status === "closed" && ownRate != null ? ownRate : priceIsNewer ? catalog : ownRate != null && ownRate > 0 ? ownRate : currentRate,
+          rate: shift.status === "closed" ? ownRate ?? 0 : catalog,
           recent: recentByNozzle.get(row.id) ?? [],
         };
       }),
@@ -642,13 +622,15 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       entry.cashierIds = currentShift.entry.cashierIds;
       if (Array.isArray(currentShift.entry.nozzleIds)) entry.nozzleIds = currentShift.entry.nozzleIds;
       const owned = await client.query(
-        `SELECT l.qty, l.product_id, pr.kind
+        `SELECT l.qty, l.product_id, l.equipment_id, l.rate, pr.kind
          FROM sale_items l
          JOIN sales s ON s.id = l.sale_id
          LEFT JOIN products pr ON pr.id = l.product_id
          WHERE s.shift_id = $1 AND s.category IN ('shift_fuel', 'shift_lube') AND s.status <> 'cancelled'`,
         [shift.id],
       );
+      const savedRates = new Map(owned.rows.filter((row) => row.equipment_id).map((row) => [row.equipment_id, num(row.rate)]));
+      entry.fuelRates = {};
       for (const row of owned.rows) {
         await moveStock(client, outlet.id, row.product_id, row.kind, Number(row.qty) || 0);
       }
@@ -688,6 +670,16 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         : { rows: [] };
       const nozzleById = new Map(equipment.rows.map((row) => [row.id, row]));
 
+      if (currentShift.status !== "closed" && nozzleIds.length) {
+        const prices = await client.query(
+          `SELECT p.id, p.selling_price FROM products p
+           WHERE p.id = ANY($1::uuid[]) ORDER BY p.id FOR SHARE OF p`,
+          [[...new Set(equipment.rows.map((row) => row.product_id).filter(Boolean))]],
+        );
+        const priceById = new Map(prices.rows.map((row) => [row.id, row.selling_price]));
+        for (const nozzle of equipment.rows) nozzle.selling_price = priceById.get(nozzle.product_id);
+      }
+
       for (const row of pumps) {
         const id = uuidOrNull(row.equipmentId);
         const nozzle = id ? nozzleById.get(id) : null;
@@ -713,7 +705,11 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         }
         const sold = Math.max(0, round2(closing - money(row.opening)));
         const test = Math.min(sold, Math.max(0, money(row.test)));
-        const rate = Math.max(0, money(shift.status === "closed" ? row.rate : nozzle.selling_price ?? row.rate));
+        const rate = currentShift.status === "closed"
+          ? num(currentShift.entry?.fuelRates?.[nozzle.id]) ?? savedRates.get(nozzle.id)
+          : num(nozzle.selling_price);
+        if (rate == null || rate <= 0) throw bad("Set a valid current fuel rate before saving this shift.");
+        entry.fuelRates[nozzle.id] = rate;
         const netQty = Math.max(0, sold - test);
         const amount = round2(netQty * rate);
         await client.query(
@@ -904,11 +900,13 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust + creditReceived);
       if (posted) {
         if (currentShift.status !== "closed") {
-          await refreshShiftFuelRates(client, shift.id, outlet.id, bad);
+          entry.fuelRates = await refreshShiftFuelRates(client, shift.id, outlet.id, bad, nozzleIds);
         }
         await client.query(
           `UPDATE shifts
-           SET entry = $2::jsonb, status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4::uuid, $5::uuid)
+           SET entry = $2::jsonb,
+               closed_at = CASE WHEN status <> 'closed' THEN clock_timestamp() ELSE closed_at END,
+               status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4::uuid, $5::uuid)
            WHERE id = $1`,
           [shift.id, JSON.stringify(entry), expected, shift.status === "closed" ? shift.closed_by : null, req.user.id],
         );

@@ -33,10 +33,16 @@ Run `npm test` for isolated regression tests; these tests do not connect to a da
 
 ## Shift meter readings
 
-Shift entry stores each nozzle's opening and closing separately. Shift details, reading lists, and reopened entries use that shift's saved values, not the nozzle's current meter. For older entries affected by identical opening/closing rows, reads recover the opening from the shift's saved `entry.meters` when available; no database rewrite is performed. New shifts carry forward the previous shift's closing reading.
+Shift entry stores each nozzle's opening and closing separately. Shift details, reading lists, and reopened entries use that shift's saved values, not the nozzle's current meter. For older entries affected by identical opening/closing rows, reads recover the opening from the shift's saved `entry.meters` when available; no meter-reading rewrite is performed.
+
+Unsaved openings carry forward each nozzle's reading from the most recently **closed** shift in that outlet, ordered by actual `closed_at`, not scheduled start/end. A backdated late-night shift closed after a morning shift therefore supplies the next opening. Open/upcoming shifts and other outlets never supply this baseline. Saved openings remain unchanged. If no closed shift has a reading for that nozzle, the latest standalone closing or equipment meter is used.
+
+Both close paths record `closed_at`; editing an already closed shift preserves it, and reopening clears it so a later closure receives a new timestamp. Deployment migration adds this column and recovers historical closure times from recognized closure activity, falling back to the last saved closing-reading timestamp when no closure event is available. That fallback is approximate for old records; future closures have explicit timestamps.
 
 ## Fuel rates at shift closing
 
 Closing an open shift (including direct shift-entry submission) checks the current fuel product prices in the database and recalculates that shift's non-cancelled `shift_fuel` lines and sale totals before closing, in one transaction. Test quantities remain excluded from billable litres. A missing or non-positive price blocks closure with an error. Lube sales, credit records, payment collections, and other shifts are unchanged.
 
 Saving an open entry uses the current fuel product price and never writes a stale entry rate back to the product catalog. Closed entries retain their saved fuel rates when viewed later; approving an already closed shift does not apply newer prices. Reopening and closing a shift again deliberately checks prices again.
+
+Open and upcoming entry responses always use current product prices, not historical sale rates or timestamp-based guesses. Closing stores `entry.fuelRates` per nozzle, including assigned nozzles without sales. Closed-entry saves ignore client-supplied rates and retain these snapshots (or stored sale-line rates for older shifts). Product prices are locked during saving/closing so the saved rates and fuel sale amounts remain consistent.

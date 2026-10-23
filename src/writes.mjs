@@ -1631,15 +1631,22 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       const entry = shift.entry && typeof shift.entry === "object" && !Array.isArray(shift.entry) ? { ...shift.entry } : {};
       if (cashierIds) entry.cashierIds = cashierIds;
       if (nozzleIds) entry.nozzleIds = nozzleIds;
-      const entryPatch = cashierIds || nozzleIds ? entry : null;
+      let entryPatch = cashierIds || nozzleIds ? entry : null;
       if (status === "closed" && shift.status !== "closed") {
-        await refreshShiftFuelRates(client, shift.id, shift.outlet_id, bad);
+        entry.fuelRates = await refreshShiftFuelRates(client, shift.id, shift.outlet_id, bad,
+          [...new Set([...(entry.nozzleIds ?? []), ...duties.map((duty) => duty.nozzleId).filter(Boolean)])]);
+        entryPatch = entry;
       }
       await client.query(
         `UPDATE shifts SET
            label = $2,
            starts_at = $3,
            ends_at = $4,
+           closed_at = CASE
+             WHEN $5::shift_status = 'closed' AND status <> 'closed' THEN clock_timestamp()
+             WHEN $5::shift_status <> 'closed' THEN NULL
+             ELSE closed_at
+           END,
            status = $5::shift_status,
            declared_cash = COALESCE($6, declared_cash),
            closed_by = COALESCE($7, closed_by),

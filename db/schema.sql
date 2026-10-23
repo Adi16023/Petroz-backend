@@ -571,6 +571,19 @@ CREATE INDEX IF NOT EXISTS equipment_outlet_idx ON equipment (outlet_id);
 CREATE INDEX IF NOT EXISTS equipment_parent_idx ON equipment (parent_id);
 CREATE INDEX IF NOT EXISTS balances_product_idx ON balances (product_id);
 ALTER TABLE shifts ADD COLUMN IF NOT EXISTS entry jsonb NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE shifts ADD COLUMN IF NOT EXISTS closed_at timestamptz;
+
+UPDATE shifts s
+SET closed_at = COALESCE(
+  (SELECT MAX(a.at) FROM activity a
+   WHERE a.target_table = 'shifts' AND a.target_id = s.id
+     AND a.action = 'shift'
+     AND (a.detail IN ('Shift submitted', 'Shift closed') OR a.detail LIKE 'Variance %')),
+  (SELECT MAX(r.at) FROM dip_readings r WHERE r.shift_id = s.id AND r.kind = 'closing')
+)
+WHERE s.status = 'closed' AND s.closed_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS shifts_closed_idx ON shifts (outlet_id, closed_at DESC) WHERE status = 'closed';
 
 CREATE INDEX IF NOT EXISTS shifts_outlet_idx ON shifts (outlet_id, starts_at);
 CREATE INDEX IF NOT EXISTS dip_readings_shift_idx ON dip_readings (shift_id);

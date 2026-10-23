@@ -14,7 +14,7 @@ const nozzleId = "00000000-0000-4000-8000-000000000008";
 const user = { id: dealerId, role: "owner", settings_id: outlet.settings_id };
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false } = {}) {
+function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, closedShiftReadings } = {}) {
   const calls = [];
   const shift = {
     id: shiftId, outlet_id: outlet.id, label: "Morning", status: "open",
@@ -44,11 +44,29 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
     if (sql.includes("SELECT e.doc_date, e.category")) return { rows: expenseHistory };
     if (sql.includes("SELECT e.id, e.label, e.meter")) return { rows: nozzles };
     if (sql.includes("SELECT equipment_id, kind, qty FROM dip_readings")) return { rows: readings };
-    if (sql.includes("SELECT r.equipment_id, r.qty")) {
+    if (sql.includes("SELECT DISTINCT ON (r.equipment_id)")) {
       assert.match(sql, /r.kind = 'closing'/);
+      assert.match(sql, /s.status = 'closed'/);
+      assert.match(sql, /s.closed_at DESC NULLS LAST, r.at DESC/);
+      assert.equal(sql.includes("starts_at"), false);
+      assert.deepEqual(params, [outlet.id, shiftId]);
+      if (closedShiftReadings) {
+        const candidates = closedShiftReadings.filter((row) =>
+          row.outlet_id === params[0] && row.shift_id !== params[1] && row.status === "closed");
+        candidates.sort((a, b) => Date.parse(b.closed_at) - Date.parse(a.closed_at));
+        const byNozzle = new Map();
+        for (const row of candidates) if (!byNozzle.has(row.equipment_id)) byNozzle.set(row.equipment_id, row);
+        return { rows: [...byNozzle.values()] };
+      }
       return { rows: priorReadings };
     }
     if (sql.includes("SELECT e.id, e.product_id, pr.name")) return { rows: nozzles };
+    if (sql.includes("SELECT p.id, p.selling_price")) {
+      return { rows: nozzles.map((row) => ({ id: row.product_id, selling_price: row.selling_price })) };
+    }
+    if (sql.includes("SELECT e.id AS equipment_id, p.selling_price")) {
+      return { rows: nozzles.map((row) => ({ equipment_id: row.id, selling_price: row.selling_price })) };
+    }
     if (sql.includes("SELECT l.equipment_id, l.qty, l.rate")) return { rows: fuelLines };
     if (sql.includes("SELECT l.id FROM sale_items")) return { rows: invalidFuelRate ? [{ id: docId }] : [] };
     if (sql.includes("INSERT INTO shifts")) return { rows: [{ id: shiftId }] };
@@ -241,7 +259,7 @@ test("historical shifts are explicitly unassigned and standalone records stay un
 });
 
 test("shift entry persists the actual opening and closing values separately", async () => {
-  const h = harness({ nozzles: [{ id: nozzleId, product_id: null }] });
+  const h = harness({ nozzles: [{ id: nozzleId, product_id: docId, selling_price: 100 }] });
   await h.request("put /api/shifts/:id/entry", {
     pumps: [{ equipmentId: nozzleId, opening: 12000, closing: 12450, rate: 0 }],
   });
@@ -311,7 +329,8 @@ test("closing locks current fuel rates and recalculates lines and sale totals be
   assert.match(h.calls[lines].sql, /ROUND\(l.qty \* p.selling_price, 2\)/);
   assert.match(h.calls[lines].sql, /s.category = 'shift_fuel' AND s.status <> 'cancelled'/);
   assert.match(h.calls[totals].sql, /net = totals.amount \+ s.tax \+ s.charges/);
-  for (const index of [lock, lines, totals]) assert.deepEqual(h.calls[index].params, [shiftId, outlet.id]);
+  assert.deepEqual(h.calls[lock].params, [shiftId, outlet.id, [nozzleId]]);
+  for (const index of [lines, totals]) assert.deepEqual(h.calls[index].params, [shiftId, outlet.id]);
 });
 
 test("missing or invalid current fuel rates abort closing without committing", async () => {
@@ -342,7 +361,7 @@ test("stale entry rates cannot overwrite current product prices, including durin
     assert.equal(line.params[5], 105.5);
     assert.equal(line.params[6], 10339);
     assert.equal(h.calls.some(({ sql }) => sql.includes("UPDATE products SET selling_price")), false);
-    assert.equal(h.calls.some(({ sql }) => sql.includes("FOR SHARE OF p")), submit);
+    assert.ok(h.calls.some(({ sql }) => sql.includes("FOR SHARE OF p")));
   }
 });
 
@@ -354,4 +373,70 @@ test("closed shift entry displays its saved rate even after catalog prices chang
   h.shift.status = "closed";
   const response = await h.request("get /api/shifts/:id/entry");
   assert.equal(response.body.nozzles[0].rate, 105.5);
+});
+
+test("open and upcoming entries always display current product prices instead of their saved sale rate", async () => {
+  for (const status of ["open", "upcoming"]) {
+    const h = harness({
+      nozzles: [{ id: nozzleId, selling_price: 120 }],
+      fuelLines: [{ equipment_id: nozzleId, qty: 100, rate: 95, test_qty: 0 }],
+    });
+    h.shift.status = status;
+    h.shift.entry.fuelRates = { [nozzleId]: 95 };
+    const response = await h.request("get /api/shifts/:id/entry");
+    assert.equal(response.body.nozzles[0].rate, 120);
+  }
+});
+
+test("closing snapshots rates even for nozzles without fuel sales", async () => {
+  const h = harness({ nozzles: [{ id: nozzleId, product_id: docId, selling_price: 105.5 }] });
+  await h.request("patch /api/shifts/:id", { status: "closed" });
+  const update = h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET"));
+  assert.deepEqual(JSON.parse(update.params[12]).fuelRates, { [nozzleId]: 105.5 });
+});
+
+test("closed entry saves ignore forged rates and preserve the stored snapshot", async () => {
+  const h = harness({ nozzles: [{ id: nozzleId, product_id: docId, kind: "fuel", selling_price: 120 }] });
+  h.shift.status = "closed";
+  h.shift.entry.fuelRates = { [nozzleId]: 105.5 };
+  await h.request("put /api/shifts/:id/entry", {
+    pumps: [{ equipmentId: nozzleId, opening: 1000, closing: 1100, rate: 1 }],
+    entry: { fuelRates: { [nozzleId]: 1 } },
+  });
+  const insert = h.calls.find(({ sql }) => sql.includes("INSERT INTO sale_items (sale_id, product_id, equipment_id"));
+  assert.equal(insert.params[5], 105.5);
+  assert.equal(insert.params[6], 10550);
+});
+
+test("carry-forward follows actual closure order, not the shifts' scheduled time", async () => {
+  const row = {
+    equipment_id: nozzleId, outlet_id: outlet.id, status: "closed",
+    starts_at: "2026-10-23T06:00:00Z", closed_at: "2026-10-23T08:00:00Z", qty: 12000,
+  };
+  const h = harness({
+    nozzles: [{ id: nozzleId, label: "Pump 1", meter: 99999 }],
+    closedShiftReadings: [
+      { ...row, shift_id: "morning" },
+      { ...row, shift_id: "late-night", starts_at: "2026-10-22T22:00:00Z", closed_at: "2026-10-23T10:00:00Z", qty: 12500 },
+      { ...row, shift_id: "unclosed", status: "open", closed_at: "2026-10-23T12:00:00Z", qty: 14000 },
+      { ...row, shift_id: "other-outlet", outlet_id: "another-outlet", closed_at: "2026-10-23T13:00:00Z", qty: 15000 },
+      { ...row, shift_id: shiftId, closed_at: "2026-10-23T14:00:00Z", qty: 16000 },
+    ],
+  });
+  const response = await h.request("get /api/shifts/:id/entry");
+  assert.equal(response.body.nozzles[0].opening, 12500);
+  assert.equal(response.body.nozzles[0].closing, 12500);
+});
+
+test("both close paths timestamp actual closure and preserve the timestamp on closed-shift edits", async () => {
+  const h = harness();
+  await h.request("patch /api/shifts/:id", { status: "closed" });
+  const patch = h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET"));
+  assert.match(patch.sql, /WHEN \$5::shift_status = 'closed' AND status <> 'closed' THEN clock_timestamp\(\)/);
+  assert.match(patch.sql, /WHEN \$5::shift_status <> 'closed' THEN NULL/);
+  assert.match(patch.sql, /ELSE closed_at/);
+  const entry = harness();
+  await entry.request("put /api/shifts/:id/entry", { submit: true });
+  const submit = entry.calls.find(({ sql }) => sql.includes("closed_at = CASE"));
+  assert.match(submit.sql, /WHEN status <> 'closed' THEN clock_timestamp\(\) ELSE closed_at END/);
 });
