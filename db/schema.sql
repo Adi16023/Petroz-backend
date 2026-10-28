@@ -628,6 +628,33 @@ CREATE TABLE IF NOT EXISTS billing (
 
 CREATE INDEX IF NOT EXISTS billing_outlet_idx ON billing (outlet_id, billed_at DESC);
 
+ALTER TABLE billing ADD COLUMN IF NOT EXISTS public_token text NOT NULL DEFAULT replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
+ALTER TABLE billing ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
+ALTER TABLE billing ADD COLUMN IF NOT EXISTS station_snapshot jsonb;
+CREATE UNIQUE INDEX IF NOT EXISTS billing_public_token_idx ON billing (public_token);
+
+UPDATE billing b SET station_snapshot = jsonb_build_object(
+  'name', o.name, 'address', COALESCE(o.address, ''), 'phone', COALESCE(o.phone, ''),
+  'gstin', COALESCE(o.gstin, ''), 'companyImage', s.company_image, 'bannerImage', s.banner_image
+)
+FROM outlets o JOIN settings s ON s.id = o.settings_id
+WHERE b.outlet_id = o.id AND b.station_snapshot IS NULL;
+
+CREATE OR REPLACE FUNCTION snapshot_bill_station() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  SELECT jsonb_build_object(
+    'name', o.name, 'address', COALESCE(o.address, ''), 'phone', COALESCE(o.phone, ''),
+    'gstin', COALESCE(o.gstin, ''), 'companyImage', s.company_image, 'bannerImage', s.banner_image
+  ) INTO NEW.station_snapshot
+  FROM outlets o JOIN settings s ON s.id = o.settings_id WHERE o.id = NEW.outlet_id;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER IF EXISTS billing_station_snapshot ON billing;
+CREATE TRIGGER billing_station_snapshot BEFORE INSERT ON billing
+FOR EACH ROW EXECUTE FUNCTION snapshot_bill_station();
+
 CREATE TABLE IF NOT EXISTS payment_methods (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   outlet_id uuid NOT NULL REFERENCES outlets (id) ON DELETE CASCADE,

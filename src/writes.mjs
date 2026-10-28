@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { billDto } from "./public-bills.mjs";
 import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
 import { assertCashierIds, assertShiftCashiers } from "./shift-cashiers.mjs";
@@ -1731,23 +1732,6 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     return lines;
   }
 
-  function billDto(row) {
-    return {
-      id: row.id,
-      outletId: row.outlet_id,
-      billNo: row.bill_no,
-      billedAt: row.billed_at,
-      customerName: row.customer_name,
-      vehicleNo: row.vehicle_no,
-      mobile: row.mobile,
-      paymentMode: row.payment_mode,
-      pumpNozzle: row.pump_nozzle,
-      attendant: row.attendant,
-      lines: row.lines ?? [],
-      total: Number(row.total) || 0,
-    };
-  }
-
   async function nextBillNo(outlet) {
     const { rows } = await pool.query(
       `SELECT COALESCE(MAX(NULLIF(split_part(bill_no, '-', 2), '')::int), 0) + 1 AS n
@@ -1831,6 +1815,19 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     await log(req.user, outlet.id, "created", `Bill ${billNo}`, "billing", rows[0].id);
     const following = await nextBillNo({ ...outlet, next_bill_no: next.n + 1 });
     res.status(201).json({ bill: billDto(rows[0]), nextBillNo: following.label });
+  }));
+
+  app.patch("/api/billing/:id/cancel", wrap(async (req, res) => {
+    const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    if (!uuidList([req.params.id])) throw bad("Invalid bill ID.");
+    const { rows } = await pool.query(
+      `UPDATE billing SET cancelled_at = COALESCE(cancelled_at, now())
+       WHERE id = $1 AND outlet_id = $2 RETURNING *`,
+      [req.params.id, outlet.id],
+    );
+    if (!rows.length) throw bad("Bill not found.", 404);
+    await log(req.user, outlet.id, "cancelled", `Bill ${rows[0].bill_no}`, "billing", rows[0].id);
+    res.json(billDto(rows[0]));
   }));
 
   const FUEL_BRANDS = ["iocl", "bpcl", "hpcl", "nayara", "jio-bp", "shell", "reliance", "mrpl"];

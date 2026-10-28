@@ -1,6 +1,6 @@
 # Petroz backend
 
-Dealer desk API. One dealer, two outlets. Phone and password login returns a JWT. Reads are GET. Creates are POST, changes are PATCH, and removals are DELETE. Every route except login and `/health` requires `Authorization: Bearer <token>`.
+Dealer desk API. One dealer, two outlets. Phone and password login returns a JWT. Reads are GET. Creates are POST, changes are PATCH, and removals are DELETE. Login, `/health`, and token-specific public bill reads are public; all private routes require a bearer token in the Authorization header.
 
 On an empty database the server creates the tables, then one dealer (Whitefield and T. Nagar) and the owner login.
 
@@ -19,7 +19,17 @@ On an empty database the server creates the tables, then one dealer (Whitefield 
 3. Start command: `npm start`
 4. Environment variables: `DATABASE_URL` (Neon pooled URL), `JWT_SECRET` (a long random string).
 5. Deploy. Open `https://<service>.onrender.com/health` — it returns `{ "ok": true }`.
-6. `POST https://<service>.onrender.com/api/login` with the owner phone and password. Send the returned token as `Authorization: Bearer <token>` on every other `/api` call.
+6. `POST https://<service>.onrender.com/api/login` with the owner phone and password. Send the returned token in the Authorization header on private `/api` calls; public bill reads use only their unguessable bill token.
+
+## Public QR bills
+
+Run `npm run db:migrate` before deploying the updated frontend. Billing rows receive a unique cryptographically random `public_token`, a station snapshot, and optional `cancelled_at`. Existing rows are backfilled once; their original station metadata cannot be recovered if it changed before migration. New bills capture current station details on insert; later station edits do not change saved bills.
+
+`GET /api/public/bills/:token` is intentionally registered before authentication. It returns only the named bill's customer/transaction details and station snapshot, not internal IDs, credentials, or access tokens. Responses are `no-store` and `noindex`. Possession of the unguessable 64-hex token grants read access with no login and no time expiry. Unknown, malformed, cancelled, or deleted bill links return 404.
+
+Authenticated `PATCH /api/billing/:id/cancel` with `{ "outletId": "..." }` verifies outlet access and marks the bill cancelled, revoking public access immediately. Cancellation is idempotent and recorded in activity. The frontend disables print/share/download for cancelled bills and omits them from today's sales summary. Already downloaded copies cannot be recalled.
+
+`node --test src/public-bills.test.mjs` validates migration reruns, token uniqueness, station snapshots, public response fields/headers, unauthenticated reads, protected cancellation, outlet isolation, and revocation using isolated in-memory PostgreSQL.
 
 ## Contacts
 
@@ -39,7 +49,7 @@ Run `node --test src/contacts.test.mjs` for isolated contacts validation, encryp
 - Document list/detail responses include `cashierIds`, `cashierNames`, and `handledBy` for shift-linked records. All assigned cashiers are included; historical shifts with no assignment return `handledBy: "Unassigned cashier"`. Standalone documents retain their original shape.
 - Shift-entry expense history exposes `paidBy` for the assigned cashiers and retains `by` as the actual creator. `createdBy`, `partyId`, `decidedBy`, and audit actors are never replaced with a cashier.
 
-Run `npm test` for isolated regression tests; these tests do not connect to a database.
+Run `npm test` for isolated regression tests using mocks and in-memory PostgreSQL; these tests never connect to the configured live database.
 
 ## Shift cash received
 

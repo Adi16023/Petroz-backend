@@ -10,6 +10,7 @@ import { ensureAttendanceUser, ensureSeed, ensureSuperAdmin } from "./seed.mjs";
 import { promoteDueShifts } from "./shift-entry.mjs";
 import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
+import { registerPublicBills } from "./public-bills.mjs";
 import { registerContacts } from "./contacts.mjs";
 import { withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
@@ -195,6 +196,7 @@ app.post("/api/login", wrap(async (req, res) => {
   });
 }));
 
+registerPublicBills(app, { pool, wrap, bad });
 app.use("/api", auth);
 
 app.get("/api/me", wrap(async (req, res) => {
