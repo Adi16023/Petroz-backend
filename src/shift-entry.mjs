@@ -998,10 +998,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         await client.query(
           `UPDATE shifts
            SET entry = $2::jsonb,
-               closed_at = CASE WHEN status <> 'closed' THEN clock_timestamp() ELSE closed_at END,
-               status = 'closed', expected_cash = $3, declared_cash = $3, closed_by = COALESCE($4::uuid, $5::uuid)
+               expected_cash = $3, declared_cash = $3
            WHERE id = $1`,
-          [shift.id, JSON.stringify(entry), expected, shift.status === "closed" ? shift.closed_by : null, req.user.id],
+          [shift.id, JSON.stringify(entry), expected],
         );
       } else {
         await client.query(

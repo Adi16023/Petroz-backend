@@ -631,17 +631,37 @@ test("carry-forward follows actual closure order, not the shifts' scheduled time
   assert.equal(response.body.nozzles[0].closing, 12500);
 });
 
-test("both close paths timestamp actual closure and preserve the timestamp on closed-shift edits", async () => {
+test("explicit closure timestamps actual closure and preserves the timestamp on closed-shift edits", async () => {
   const h = harness();
   await h.request("patch /api/shifts/:id", { status: "closed" });
   const patch = h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET"));
   assert.match(patch.sql, /WHEN \$5::shift_status = 'closed' AND status <> 'closed' THEN clock_timestamp\(\)/);
   assert.match(patch.sql, /WHEN \$5::shift_status <> 'closed' THEN NULL/);
   assert.match(patch.sql, /ELSE closed_at/);
-  const entry = harness();
-  await entry.request("put /api/shifts/:id/entry", { submit: true });
-  const submit = entry.calls.find(({ sql }) => sql.includes("closed_at = CASE"));
-  assert.match(submit.sql, /WHEN status <> 'closed' THEN clock_timestamp\(\) ELSE closed_at END/);
+});
+
+test("entry submission posts transactions without changing shift status or closure metadata", async () => {
+  for (const status of ["open", "upcoming", "closed"]) {
+    for (const submit of [false, true]) {
+      const h = harness();
+      Object.assign(h.shift, { status, closed_at: status === "closed" ? "2026-10-23T14:00:00Z" : null, closed_by: status === "closed" ? dealerId : null });
+      const response = await h.request("put /api/shifts/:id/entry", {
+        submit,
+        entry: { totals: { cash: 100 } },
+        payments: [{ mode: "cash", amount: 100 }],
+      });
+      const updates = h.calls.filter(({ sql }) => /UPDATE shifts/.test(sql) && /entry = \$2::jsonb/.test(sql));
+      assert.ok(updates.length > 0);
+      for (const { sql } of updates) {
+        assert.doesNotMatch(sql, /\bstatus\s*=/);
+        assert.doesNotMatch(sql, /\bclosed_(at|by)\s*=/);
+      }
+      assert.equal(response.body.shift.status, status);
+      const payments = h.calls.filter(({ sql }) => /INSERT INTO documents/.test(sql) && sql.includes("'payment'"));
+      assert.equal(payments.length, 1);
+      assert.ok(payments[0].params.includes(submit || status === "closed" ? "approved" : "draft"));
+    }
+  }
 });
 
 test("saving a fuel rate updates matching fuel records used by nozzles without changing closed shifts", async () => {
