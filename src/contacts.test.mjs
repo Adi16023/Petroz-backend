@@ -20,7 +20,8 @@ test("validates all three record types and rejects invalid input", () => {
 });
 
 test("credential encryption round trips, randomizes ciphertext and rejects tampering", () => {
-  const original = process.env.CONTACTS_ENCRYPTION_KEY;
+  const originalKey = process.env.CONTACTS_ENCRYPTION_KEY;
+  const originalJwtSecret = process.env.JWT_SECRET;
   try {
     process.env.CONTACTS_ENCRYPTION_KEY = randomBytes(32).toString("hex");
     const value = encryptPassword("private-password");
@@ -31,11 +32,18 @@ test("credential encryption round trips, randomizes ciphertext and rejects tampe
     parts[2] = Buffer.from("tampered").toString("base64");
     assert.throws(() => decryptPassword(parts.join(".")));
     delete process.env.CONTACTS_ENCRYPTION_KEY;
-    assert.throws(() => encryptPassword("password"), /not configured/);
+    process.env.JWT_SECRET = randomBytes(32).toString("hex");
+    const derivedKeyValue = encryptPassword("private-password");
+    assert.equal(decryptPassword(derivedKeyValue), "private-password");
+    assert.notEqual(encryptPassword("private-password"), derivedKeyValue);
+    process.env.JWT_SECRET = "";
+    assert.throws(() => encryptPassword("password"), /requires JWT_SECRET/);
     assert.equal(encryptPassword(""), "");
   } finally {
-    if (original === undefined) delete process.env.CONTACTS_ENCRYPTION_KEY;
-    else process.env.CONTACTS_ENCRYPTION_KEY = original;
+    if (originalKey === undefined) delete process.env.CONTACTS_ENCRYPTION_KEY;
+    else process.env.CONTACTS_ENCRYPTION_KEY = originalKey;
+    if (originalJwtSecret === undefined) delete process.env.JWT_SECRET;
+    else process.env.JWT_SECRET = originalJwtSecret;
   }
 });
 

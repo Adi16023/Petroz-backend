@@ -27,7 +27,7 @@ On an empty database the server creates the tables, then one dealer (Whitefield 
 
 Owners and managers may use `GET /api/contacts?outletId=...`, `POST /api/contacts`, `PATCH /api/contacts/:id`, and `DELETE /api/contacts/:id?outletId=...`. Create/update bodies contain `outletId`, `tab`, `name`, `company`, `category`, `phone`, `email`, `website`, `username`, `password`, and `notes`. Updates replace the editable record; tab and outlet cannot be moved. All routes verify outlet access.
 
-Set `CONTACTS_ENCRYPTION_KEY` to a persistent 64-character hex key before saving Website Logins. Passwords are encrypted with AES-256-GCM using a random IV for each write, and decrypted only for authorized API responses with `Cache-Control: no-store`. Preserve this key when deploying or restoring the database. Missing configuration explicitly blocks credential writes/reads, without affecting non-login records.
+Website Login passwords are encrypted with AES-256-GCM using a random IV for each write, and decrypted only for authorized API responses with `Cache-Control: no-store`. By default, the backend derives a separate encryption key from the required `JWT_SECRET`, so no extra environment variable is needed. Keep `JWT_SECRET` stable across deployments and database restores; changing it makes saved passwords unreadable unless an explicit key is configured. An optional `CONTACTS_ENCRYPTION_KEY` can override the derived key and must be a persistent 64-character hex key. Changing the active key makes saved passwords unreadable.
 
 Run `node --test src/contacts.test.mjs` for isolated contacts validation, encryption, and route tests.
 

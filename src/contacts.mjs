@@ -1,16 +1,25 @@
-import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
+import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from "node:crypto";
 
 const TABS = ["customers", "business", "logins"];
 const FIELDS = ["name", "company", "category", "phone", "email", "website", "username", "password", "notes"];
 
 function key() {
-  const value = process.env.CONTACTS_ENCRYPTION_KEY ?? "";
-  if (!/^[a-f\d]{64}$/i.test(value)) {
-    const error = new Error("Website credential storage is not configured. Set CONTACTS_ENCRYPTION_KEY to a 64-character hex key.");
+  const configured = process.env.CONTACTS_ENCRYPTION_KEY;
+  if (configured) {
+    if (!/^[a-f\d]{64}$/i.test(configured)) {
+      const error = new Error("CONTACTS_ENCRYPTION_KEY must be a 64-character hex key.");
+      error.status = 503;
+      throw error;
+    }
+    return Buffer.from(configured, "hex");
+  }
+  const secret = process.env.JWT_SECRET;
+  if (!secret) {
+    const error = new Error("Website credential storage requires JWT_SECRET or CONTACTS_ENCRYPTION_KEY.");
     error.status = 503;
     throw error;
   }
-  return Buffer.from(value, "hex");
+  return Buffer.from(hkdfSync("sha256", secret, "petroz-contacts", "website-login-passwords", 32));
 }
 
 export function encryptPassword(password) {
