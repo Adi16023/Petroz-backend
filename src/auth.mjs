@@ -16,7 +16,7 @@ export function signToken(user) {
   return jwt.sign(
     { sub: user.id, dealerId: user.settings_id, role: user.role },
     process.env.JWT_SECRET,
-    { expiresIn: "7d" },
+    { expiresIn: "12h" },
   );
 }
 
@@ -26,7 +26,7 @@ export function requireAuth(pool) {
     const token = header.startsWith("Bearer ") ? header.slice(7) : "";
     if (!token) return res.status(401).json({ error: "Sign in required." });
     try {
-      const payload = jwt.verify(token, process.env.JWT_SECRET);
+      const payload = jwt.verify(token, process.env.JWT_SECRET, { maxAge: "12h" });
       const { rows } = await pool.query(
         `SELECT * FROM users WHERE id = $1 AND active = true`,
         [payload.sub],

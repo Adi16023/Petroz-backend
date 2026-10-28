@@ -1407,7 +1407,10 @@ app.get("/api/equipment", wrap(async (req, res) => {
 app.get("/api/products", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const { rows } = await pool.query(
-    `SELECT pr.*, b.on_hand, b.min_qty
+    `SELECT pr.*, b.on_hand, b.min_qty,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+         'day', h.day, 'purchasePrice', h.purchase_price, 'sellingPrice', h.selling_price
+       ) ORDER BY h.day) FROM product_daily_prices h WHERE h.product_id = pr.id), '[]'::jsonb) AS price_history
      FROM products pr
      LEFT JOIN balances b ON b.product_id = pr.id AND b.outlet_id = $1
      WHERE pr.settings_id = $2
@@ -1425,6 +1428,7 @@ app.get("/api/products", wrap(async (req, res) => {
     gst: num(row.gst),
     purchasePrice: num(row.purchase_price),
     sellingPrice: num(row.selling_price),
+    priceHistory: row.price_history,
     active: row.active !== false,
     onHand: num(row.on_hand) ?? 0,
     minQty: num(row.min_qty) ?? 0,
@@ -1435,7 +1439,10 @@ app.get("/api/products", wrap(async (req, res) => {
 app.get("/api/products/:id", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const product = await pool.query(
-    `SELECT pr.*, b.on_hand, b.min_qty
+    `SELECT pr.*, b.on_hand, b.min_qty,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+         'day', h.day, 'purchasePrice', h.purchase_price, 'sellingPrice', h.selling_price
+       ) ORDER BY h.day) FROM product_daily_prices h WHERE h.product_id = pr.id), '[]'::jsonb) AS price_history
      FROM products pr
      LEFT JOIN balances b ON b.product_id = pr.id AND b.outlet_id = $2
      WHERE pr.id = $1 AND pr.settings_id = $3`,
@@ -1475,6 +1482,7 @@ app.get("/api/products/:id", wrap(async (req, res) => {
     gst: num(row.gst),
     purchasePrice: num(row.purchase_price),
     sellingPrice: num(row.selling_price),
+    priceHistory: row.price_history,
     onHand: num(row.on_hand) ?? 0,
     minQty: num(row.min_qty) ?? 0,
     movement: movement.rows.map((line) => ({

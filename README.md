@@ -63,6 +63,14 @@ The explicit Close Shift action records `closed_at`; entry saving and submission
 
 ## Fuel rates at shift closing
 
+Authentication tokens for every login role expire 12 hours after issuance. Authentication also enforces a maximum token age of 12 hours, so previously issued seven-day tokens cannot bypass the new limit. Activity does not renew the session; users must log in again.
+
+### Daily lube/FMCG product prices
+
+`npm run db:migrate` also installs `product_daily_prices` and a database trigger covering product creation and price updates from every write path. Both cost and selling price are saved atomically with the product change, keyed by product and IST business day. Multiple changes on one day replace that day's prices; earlier days are preserved, and unchanged prices carry forward. Product prices retain their existing dealer-wide scope.
+
+Product list/detail responses include `priceHistory: [{ day, purchasePrice, sellingPrice }]`. The frontend uses the sale's document/business date to select daily cost for profit and the original transaction amount for revenue. This is daily costing, not inventory batch/FIFO costing. Migration seeds existing products with current prices at their creation day as an approximate baseline; missing historical price changes cannot be recovered. Re-running migration does not replace existing history. Deploy this migration before serving the updated product API. The migration/trigger tests run in an isolated PostgreSQL-compatible PGlite database, without accessing deployed data.
+
 Closing an open shift through the separate Close Shift action checks the current fuel product prices in the database and recalculates that shift's non-cancelled `shift_fuel` lines and sale totals before closing, in one transaction. Entry submission also uses current prices but does not close the shift. Test quantities remain excluded from billable litres. A missing or non-positive price blocks closure with an error. Lube sales, credit records, payment collections, and other shifts are unchanged.
 
 Saving an open entry uses the current fuel product price and never writes a stale entry rate back to the product catalog. Closed entries retain their saved fuel rates when viewed later; approving an already closed shift does not apply newer prices. Reopening and closing a shift again deliberately checks prices again.

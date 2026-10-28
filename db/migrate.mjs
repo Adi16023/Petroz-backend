@@ -7,6 +7,7 @@ import "dotenv/config";
 const dir = path.dirname(fileURLToPath(import.meta.url));
 const reshape = fs.readFileSync(path.join(dir, "reshape.sql"), "utf8");
 const sql = fs.readFileSync(path.join(dir, "schema.sql"), "utf8");
+const productPrices = fs.readFileSync(path.join(dir, "product-prices.sql"), "utf8");
 
 function directUrl(url) {
   if (!url) throw new Error("DATABASE_URL is not set.");
@@ -58,6 +59,7 @@ export async function migrate() {
     await client.query("BEGIN");
     await client.query(reshape);
     await client.query(sql);
+    await client.query(productPrices);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
