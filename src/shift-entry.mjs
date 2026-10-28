@@ -1,4 +1,5 @@
 import { assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
+import { moveShopStock } from "./stock-batches.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
 import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
 import { isShiftDsrLocked } from "./shift-dsr-lock.mjs";
@@ -164,7 +165,7 @@ function entryOf(body) {
   };
 }
 
-async function moveStock(client, outletId, productId, kind, qtyDelta) {
+async function moveStock(client, outletId, productId, kind, qtyDelta, saleItemId = null, restore = false) {
   if (!productId || !qtyDelta) return;
   if (kind === "fuel") {
     await client.query(
@@ -178,12 +179,7 @@ async function moveStock(client, outletId, productId, kind, qtyDelta) {
     );
     return;
   }
-  await client.query(
-    `INSERT INTO balances (outlet_id, product_id, on_hand, min_qty)
-     VALUES ($1, $2, $3, 0)
-     ON CONFLICT (outlet_id, product_id) DO UPDATE SET on_hand = balances.on_hand + EXCLUDED.on_hand`,
-    [outletId, productId, qtyDelta],
-  );
+  await moveShopStock(client, outletId, productId, qtyDelta, { saleItemId, restore });
 }
 
 async function ensureCreditCustomer(client, outlet, row) {
@@ -410,11 +406,11 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         [shift.id],
       ),
       pool.query(
-        `SELECT id, name, brand, unit, selling_price
-         FROM products
-         WHERE settings_id = $1 AND kind IN ('lube', 'fmcg')
-         ORDER BY name`,
-        [settingsId],
+        `SELECT p.id, p.name, p.brand, p.unit, COALESCE(b.selling_price,p.selling_price) AS selling_price
+         FROM products p LEFT JOIN balances b ON b.product_id=p.id AND b.outlet_id=$2
+         WHERE p.settings_id = $1 AND p.kind IN ('lube', 'fmcg')
+         ORDER BY p.name`,
+        [settingsId,outletId],
       ),
       pool.query(
         `SELECT id, name, employee_code
@@ -715,7 +711,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       }
       if (Array.isArray(currentShift.entry.nozzleIds)) entry.nozzleIds = currentShift.entry.nozzleIds;
       const owned = await client.query(
-        `SELECT l.qty, l.product_id, l.equipment_id, l.rate, pr.kind
+        `SELECT l.id AS sale_item_id, l.qty, l.product_id, l.equipment_id, l.rate, pr.kind
          FROM sale_items l
          JOIN sales s ON s.id = l.sale_id
          LEFT JOIN products pr ON pr.id = l.product_id
@@ -725,7 +721,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       const savedRates = new Map(owned.rows.filter((row) => row.equipment_id).map((row) => [row.equipment_id, num(row.rate)]));
       entry.fuelRates = {};
       for (const row of owned.rows) {
-        await moveStock(client, outlet.id, row.product_id, row.kind, Number(row.qty) || 0);
+        await moveStock(client, outlet.id, row.product_id, row.kind, Number(row.qty) || 0, row.sale_item_id, true);
       }
       await client.query(
         `DELETE FROM sale_items WHERE sale_id IN (
@@ -852,12 +848,12 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
             clip(row.vehicle, 80) || null, clip(row.note, 200) || null, atOnShift(shift.starts_at, row.time),
           ],
         );
-        await client.query(
+        const saleItem = await client.query(
           `INSERT INTO sale_items (sale_id, product_id, description, qty, rate, amount)
-           VALUES ($1,$2,$3,$4,$5,$6)`,
+           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
           [inserted.rows[0].id, item.id, item.name, qty, rate, amount],
         );
-        await moveStock(client, outlet.id, item.id, item.kind, -qty);
+        await moveStock(client, outlet.id, item.id, item.kind, -qty, saleItem.rows[0].id);
       }
 
       for (const row of payments) {

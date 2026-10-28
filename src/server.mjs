@@ -108,6 +108,7 @@ function lineDto(row) {
     amount: num(row.amount),
     testQty: num(row.test_qty),
     qtyReceived: num(row.qty_received),
+    stockCost: num(row.stock_cost),
   };
 }
 
@@ -1410,6 +1411,13 @@ app.get("/api/products", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const { rows } = await pool.query(
     `SELECT pr.*, b.on_hand, b.min_qty,
+        b.purchase_price AS active_purchase_price, b.selling_price AS active_selling_price,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'id', q.id::text, 'quantity', q.remaining, 'purchasePrice', q.purchase_price, 'sellingPrice', q.selling_price
+        ) ORDER BY q.id) FROM stock_batches q WHERE q.product_id=pr.id AND q.outlet_id=$1 AND q.remaining>0),'[]'::jsonb) AS stock_batches,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'day', h.day, 'purchasePrice', h.purchase_price, 'sellingPrice', h.selling_price
+        ) ORDER BY h.day) FROM outlet_product_daily_prices h WHERE h.product_id=pr.id AND h.outlet_id=$1),'[]'::jsonb) AS outlet_price_history,
        COALESCE((SELECT jsonb_agg(jsonb_build_object(
          'day', h.day, 'purchasePrice', h.purchase_price, 'sellingPrice', h.selling_price
        ) ORDER BY h.day) FROM product_daily_prices h WHERE h.product_id = pr.id), '[]'::jsonb) AS price_history
@@ -1428,9 +1436,10 @@ app.get("/api/products", wrap(async (req, res) => {
     hsn: row.hsn,
     unit: row.unit,
     gst: num(row.gst),
-    purchasePrice: num(row.purchase_price),
-    sellingPrice: num(row.selling_price),
-    priceHistory: row.price_history,
+    purchasePrice: num(row.active_purchase_price ?? row.purchase_price),
+    sellingPrice: num(row.active_selling_price ?? row.selling_price),
+    priceHistory: [...row.price_history.filter((price) => !row.outlet_price_history.some((entry) => entry.day <= price.day)), ...row.outlet_price_history],
+    stockBatches: row.stock_batches,
     active: row.active !== false,
     onHand: num(row.on_hand) ?? 0,
     minQty: num(row.min_qty) ?? 0,
@@ -1442,6 +1451,13 @@ app.get("/api/products/:id", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const product = await pool.query(
     `SELECT pr.*, b.on_hand, b.min_qty,
+        b.purchase_price AS active_purchase_price, b.selling_price AS active_selling_price,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'id', q.id::text, 'quantity', q.remaining, 'purchasePrice', q.purchase_price, 'sellingPrice', q.selling_price
+        ) ORDER BY q.id) FROM stock_batches q WHERE q.product_id=pr.id AND q.outlet_id=$2 AND q.remaining>0),'[]'::jsonb) AS stock_batches,
+        COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'day', h.day, 'purchasePrice', h.purchase_price, 'sellingPrice', h.selling_price
+        ) ORDER BY h.day) FROM outlet_product_daily_prices h WHERE h.product_id=pr.id AND h.outlet_id=$2),'[]'::jsonb) AS outlet_price_history,
        COALESCE((SELECT jsonb_agg(jsonb_build_object(
          'day', h.day, 'purchasePrice', h.purchase_price, 'sellingPrice', h.selling_price
        ) ORDER BY h.day) FROM product_daily_prices h WHERE h.product_id = pr.id), '[]'::jsonb) AS price_history
@@ -1482,9 +1498,10 @@ app.get("/api/products/:id", wrap(async (req, res) => {
     hsn: row.hsn,
     unit: row.unit,
     gst: num(row.gst),
-    purchasePrice: num(row.purchase_price),
-    sellingPrice: num(row.selling_price),
-    priceHistory: row.price_history,
+    purchasePrice: num(row.active_purchase_price ?? row.purchase_price),
+    sellingPrice: num(row.active_selling_price ?? row.selling_price),
+    priceHistory: [...row.price_history.filter((price) => !row.outlet_price_history.some((entry) => entry.day <= price.day)), ...row.outlet_price_history],
+    stockBatches: row.stock_batches,
     onHand: num(row.on_hand) ?? 0,
     minQty: num(row.min_qty) ?? 0,
     movement: movement.rows.map((line) => ({
@@ -1634,6 +1651,7 @@ const saleSelect = `
            'rate', l.rate,
            'amount', l.amount,
            'test_qty', l.test_qty,
+           'stock_cost', l.stock_cost,
            'qty_received', NULL
          )) FILTER (WHERE l.id IS NOT NULL), '[]') AS lines
   FROM sales s
@@ -1973,7 +1991,7 @@ app.patch("/api/support-tickets/:id", wrap(async (req, res) => {
 }));
 
 app.use((error, _req, res, _next) => {
-  const status = error.status || 500;
+  const status = error.status || (error.code === "P0001" ? 400 : 500);
   if (status === 500) console.error(error);
   res.status(status).json({ error: status === 500 ? "Something went wrong." : error.message });
 });

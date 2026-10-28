@@ -15,7 +15,7 @@ const nozzleId = "00000000-0000-4000-8000-000000000008";
 const user = { id: dealerId, name: "Dealer", role: "owner", settings_id: outlet.settings_id };
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, closedShiftReadings, outletAllowed = true, failActivity = false, dsrDays = [] } = {}) {
+function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, closedShiftReadings, outletAllowed = true, failActivity = false, dsrDays = [], ownedShopSales = [], shopProduct = null } = {}) {
   const calls = [];
   const shift = {
     id: shiftId, outlet_id: outlet.id, label: "Morning", status: "open",
@@ -35,7 +35,8 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
         row.day >= day(params[1]) && row.day <= day(params[2])) };
     }
     if (sql.includes("SELECT * FROM shifts")) return { rows: missingShift ? [] : [shift] };
-    if (sql.includes("SELECT id, name, kind FROM products")) return { rows: [{ id: docId, name: "Petrol", kind: "fuel" }] };
+    if (sql.includes("SELECT l.id AS sale_item_id")) return { rows: ownedShopSales };
+    if (sql.includes("SELECT id, name, kind FROM products")) return { rows: [shopProduct ?? { id: docId, name: "Petrol", kind: "fuel" }] };
     if (sql.includes("SELECT id, name FROM users")) {
       assert.match(sql, /settings_id = \$2/);
       assert.match(sql, /role IN \('staff', 'manager'\)/);
@@ -550,6 +551,26 @@ test("editing or approving a closed shift does not reprice it at later rates", a
     await h.request("patch /api/shifts/:id", status === "closed" ? { status: "closed" } : { label: "Evening" });
     assert.equal(h.calls.some(({ sql }) => sql.includes("UPDATE sale_items l SET rate")), false);
   }
+});
+
+test("rewriting lube shift entries restores original FIFO allocations before consuming the replacement lines", async () => {
+  const h = harness({
+    ownedShopSales: [{ sale_item_id: nozzleId, product_id: docId, qty: 8, kind: "lube" }],
+    shopProduct: { id: docId, name: "Oil", kind: "lube" },
+  });
+  await h.request("put /api/shifts/:id/entry", {
+    lubes: [{ productId: docId, qty: 8, rate: 20, mode: "cash" }],
+  });
+  const moves = h.calls.filter(({ sql }) => sql.includes("SELECT move_shop_stock"));
+  assert.equal(moves.length, 2);
+  assert.deepEqual(moves[0].params, [outlet.id,docId,8,null,null,null,nozzleId,true]);
+  assert.deepEqual(moves[1].params, [outlet.id,docId,-8,null,null,null,docId,false]);
+  const restoration = h.calls.indexOf(moves[0]);
+  const deletion = h.calls.findIndex(({ sql }) => sql.includes("DELETE FROM sale_items"));
+  const consumption = h.calls.indexOf(moves[1]);
+  assert.ok(restoration < deletion && deletion < consumption);
+  const line = h.calls.find(({ sql }) => sql.includes("INSERT INTO sale_items (sale_id, product_id, description"));
+  assert.equal(line.params[4], 20);
 });
 
 test("stale entry rates cannot overwrite current product prices, including during direct submit", async () => {

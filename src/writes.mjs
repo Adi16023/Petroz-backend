@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { billDto } from "./public-bills.mjs";
+import { moveShopStock } from "./stock-batches.mjs";
 import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
 import { assertCashierIds, assertShiftCashiers } from "./shift-cashiers.mjs";
@@ -252,9 +253,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         id = inserted.rows[0].id;
         for (const line of lines) {
           const product = await productId(req.user, line.productName ?? line.description);
-          await client.query(
+          const saleItem = await client.query(
             `INSERT INTO sale_items (sale_id, product_id, equipment_id, description, qty, rate, amount)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
             [id, product, line.equipmentId || null, line.description ?? line.productName ?? null, money(line.qty), money(line.rate), money(line.amount)],
           );
           const sold = product ? await client.query(`SELECT kind FROM products WHERE id = $1`, [product]) : { rows: [] };
@@ -269,12 +270,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
               [outlet.id, product, money(line.qty) / 1000],
             );
           } else if (product) {
-            await client.query(
-              `INSERT INTO balances (outlet_id, product_id, on_hand, min_qty)
-               VALUES ($1, $2, $3, 0)
-               ON CONFLICT (outlet_id, product_id) DO UPDATE SET on_hand = balances.on_hand + EXCLUDED.on_hand`,
-              [outlet.id, product, -money(line.qty)],
-            );
+            if (money(line.qty) < 0) throw bad("Sale quantity cannot be negative.");
+            if (status === "cancelled") {
+              // Mark new cancelled lines as batch-managed for later reactivation.
+              await client.query("UPDATE sale_items SET stock_cost=0 WHERE id=$1", [saleItem.rows[0].id]);
+            } else {
+              await moveShopStock(client, outlet.id, product, -money(line.qty), { saleItemId: saleItem.rows[0].id });
+            }
           }
         }
         if (mode === "cash" && req.body?.shiftId) {
@@ -304,13 +306,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
             }
             await client.query(
               `UPDATE products SET purchase_price = $3, selling_price = $4, price_at = clock_timestamp()
-               WHERE id = $1 AND settings_id = $2`,
+               WHERE id = $1 AND settings_id = $2 AND kind = 'fuel'`,
               [product, outlet.settings_id, Number(line.rate), Number(line.sellingPrice)],
             );
           }
-          await client.query(
+          const purchaseItem = await client.query(
             `INSERT INTO purchase_items (purchase_id, product_id, equipment_id, description, qty, rate, amount, qty_received)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
             [id, product, line.equipmentId || null, line.description ?? line.productName ?? null, money(line.qty), money(line.rate), money(line.amount), received],
           );
           const stockQty = received ?? (kind === "purchase" ? money(line.qty) : 0);
@@ -326,12 +328,11 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
               [outlet.id, product, stockQty],
             );
           } else if (product && stockQty) {
-            await client.query(
-              `INSERT INTO balances (outlet_id, product_id, on_hand, min_qty)
-               VALUES ($1, $2, $3, 0)
-               ON CONFLICT (outlet_id, product_id) DO UPDATE SET on_hand = balances.on_hand + EXCLUDED.on_hand`,
-              [outlet.id, product, stockQty],
-            );
+            await moveShopStock(client, outlet.id, product, stockQty, {
+              purchasePrice: money(line.rate),
+              sellingPrice: Object.prototype.hasOwnProperty.call(line, "sellingPrice") ? Number(line.sellingPrice) : null,
+              purchaseItemId: purchaseItem.rows[0].id,
+            });
           }
         }
       } else if (kind === "expense" || kind === "expense_schedule") {
@@ -396,12 +397,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
             [id, product, line.equipmentId || null, line.description ?? line.productName ?? null, money(line.qty), money(line.rate), money(line.amount), line.qtyReceived == null ? null : money(line.qtyReceived)],
           );
           if (product && line.stockQty) {
-            await client.query(
-              `INSERT INTO balances (outlet_id, product_id, on_hand, min_qty)
-               VALUES ($1, $2, $3, 0)
-               ON CONFLICT (outlet_id, product_id) DO UPDATE SET on_hand = balances.on_hand + EXCLUDED.on_hand`,
-              [outlet.id, product, money(line.stockQty)],
-            );
+            await moveShopStock(client, outlet.id, product, money(line.stockQty));
           }
         }
       }
@@ -529,52 +525,64 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         }
       }
       if (table === "purchases" && req.body?.line) {
-        const sets = [];
-        const params = [row.id];
-        const put = (column, value) => {
-          params.push(value);
-          sets.push(`${column} = $${params.length}`);
-        };
-        if (Object.prototype.hasOwnProperty.call(req.body, "reference")) put("reference", String(req.body.reference ?? "").trim() || null);
-        if (Object.prototype.hasOwnProperty.call(req.body, "docNo")) put("doc_no", String(req.body.docNo ?? "").trim() || null);
-        if (req.body.amount != null && req.body.amount !== "") {
-          const total = money(req.body.amount);
-          put("amount", total);
-          put("net", total);
-        }
-        if (Object.prototype.hasOwnProperty.call(req.body, "dueDate")) put("due_date", optionalDay(req.body.dueDate));
-        if (Object.prototype.hasOwnProperty.call(req.body, "docDate")) put("doc_date", day(req.body.docDate));
-        if (Object.prototype.hasOwnProperty.call(req.body, "note")) put("note", String(req.body.note ?? "").trim() || null);
-        if (status) {
-          put("status", status);
-          put("decided_by", req.user.id);
-        }
-        if (sets.length) await pool.query(`UPDATE purchases SET ${sets.join(", ")} WHERE id = $1`, params);
-        const line = req.body.line;
-        const item = await pool.query(`SELECT id FROM purchase_items WHERE purchase_id = $1 ORDER BY id LIMIT 1`, [row.id]);
-        if (item.rows[0]) {
-          const product = line.description ? await productId(req.user, line.description) : null;
-          await pool.query(
-            `UPDATE purchase_items
-             SET description = COALESCE($2, description),
-                 product_id = COALESCE($3, product_id),
-                 qty = COALESCE($4, qty),
-                 rate = COALESCE($5, rate),
-                 amount = COALESCE($6, amount),
-                 qty_received = COALESCE($7, qty_received)
-             WHERE id = $1`,
-            [
-              item.rows[0].id,
-              line.description == null || line.description === "" ? null : String(line.description),
-              product,
-              line.qty == null || line.qty === "" ? null : money(line.qty),
-              line.rate == null || line.rate === "" ? null : money(line.rate),
-              line.amount == null || line.amount === "" ? null : money(line.amount),
-              line.qtyReceived == null || line.qtyReceived === "" ? null : money(line.qtyReceived),
-            ],
+        const client = await pool.connect();
+        try {
+          await client.query("BEGIN");
+          const sets = [];
+          const params = [row.id];
+          const put = (column, value) => {
+            params.push(value);
+            sets.push(`${column} = $${params.length}`);
+          };
+          if (Object.prototype.hasOwnProperty.call(req.body, "reference")) put("reference", String(req.body.reference ?? "").trim() || null);
+          if (Object.prototype.hasOwnProperty.call(req.body, "docNo")) put("doc_no", String(req.body.docNo ?? "").trim() || null);
+          if (req.body.amount != null && req.body.amount !== "") {
+            const total = money(req.body.amount);
+            put("amount", total);
+            put("net", total);
+          }
+          if (Object.prototype.hasOwnProperty.call(req.body, "dueDate")) put("due_date", optionalDay(req.body.dueDate));
+          if (Object.prototype.hasOwnProperty.call(req.body, "docDate")) put("doc_date", day(req.body.docDate));
+          if (Object.prototype.hasOwnProperty.call(req.body, "note")) put("note", String(req.body.note ?? "").trim() || null);
+          if (status) {
+            put("status", status);
+            put("decided_by", req.user.id);
+          }
+          if (sets.length) await client.query(`UPDATE purchases SET ${sets.join(", ")} WHERE id = $1`, params);
+          const line = req.body.line;
+          const item = await client.query(`SELECT id FROM purchase_items WHERE purchase_id = $1 ORDER BY id LIMIT 1`, [row.id]);
+          if (item.rows[0]) {
+            const product = line.description ? await productId(req.user, line.description) : null;
+            await client.query(
+              `UPDATE purchase_items
+               SET description = COALESCE($2, description),
+                   product_id = COALESCE($3, product_id),
+                   qty = COALESCE($4, qty),
+                   rate = COALESCE($5, rate),
+                   amount = COALESCE($6, amount),
+                   qty_received = COALESCE($7, qty_received)
+               WHERE id = $1`,
+              [
+                item.rows[0].id,
+                line.description == null || line.description === "" ? null : String(line.description),
+                product,
+                line.qty == null || line.qty === "" ? null : money(line.qty),
+                line.rate == null || line.rate === "" ? null : money(line.rate),
+                line.amount == null || line.amount === "" ? null : money(line.amount),
+                line.qtyReceived == null || line.qtyReceived === "" ? null : money(line.qtyReceived),
+              ],
+            );
+          }
+          await client.query(
+            `INSERT INTO activity (outlet_id,actor_id,action,detail,target_table,target_id) VALUES($1,$2,'updated',$3,$4,$5)`,
+            [row.outlet_id,req.user.id,`purchases ${status ?? "edited"}`,table,row.id],
           );
-        }
-        await log(req.user, row.outlet_id, "updated", `purchases ${status ?? "edited"}`, table, row.id);
+          await client.query("COMMIT");
+        } catch (error) {
+          await client.query("ROLLBACK");
+          if (error.code === "P0001") error.status = 400;
+          throw error;
+        } finally { client.release(); }
         res.json({ id: row.id, status: status ?? null });
         return;
       }
@@ -698,9 +706,21 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           throw bad("Only the dealer can delete opening cash.", 403);
         }
       }
-      if (child) await pool.query(`DELETE FROM ${child} WHERE ${fk} = $1`, [row.id]);
-      await pool.query(`DELETE FROM ${table} WHERE id = $1`, [row.id]);
-      await log(req.user, row.outlet_id, "deleted", reason, table, row.id);
+      const client = await pool.connect();
+      try {
+        await client.query("BEGIN");
+        if (child) await client.query(`DELETE FROM ${child} WHERE ${fk} = $1`, [row.id]);
+        await client.query(`DELETE FROM ${table} WHERE id = $1`, [row.id]);
+        await client.query(
+          `INSERT INTO activity (outlet_id,actor_id,action,detail,target_table,target_id) VALUES($1,$2,'deleted',$3,$4,$5)`,
+          [row.outlet_id,req.user.id,reason,table,row.id],
+        );
+        await client.query("COMMIT");
+      } catch (error) {
+        await client.query("ROLLBACK");
+        if (error.code === "P0001") error.status = 400;
+        throw error;
+      } finally { client.release(); }
       res.json({ id: row.id, deleted: true });
       return;
     }
@@ -989,15 +1009,17 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const name = String(body.name ?? "").trim();
     if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Product name is required.");
     await pool.query(
-      `UPDATE products SET
+      `WITH updated AS (UPDATE products SET
          name = CASE WHEN $2 THEN $3 ELSE name END,
          unit = CASE WHEN $4 THEN $5 ELSE unit END,
          gst = CASE WHEN $6 THEN $7 ELSE gst END,
          purchase_price = CASE WHEN $8 THEN $9 ELSE purchase_price END,
          selling_price = CASE WHEN $10 THEN $11 ELSE selling_price END,
-         price_at = CASE WHEN $10 THEN now() ELSE price_at END,
+         price_at = CASE WHEN $8 OR $10 THEN clock_timestamp() ELSE price_at END,
          active = CASE WHEN $12 THEN $13 ELSE active END
-       WHERE id = $1`,
+       WHERE id = $1 RETURNING id,kind)
+       SELECT set_active_stock_prices(id,CASE WHEN $8 THEN $9 ELSE NULL END,CASE WHEN $10 THEN $11 ELSE NULL END)
+       FROM updated WHERE kind IN ('lube','fmcg') AND ($8 OR $10)`,
       [
         req.params.id,
         Object.prototype.hasOwnProperty.call(body, "name"),
@@ -1512,7 +1534,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (!current.rows[0]) throw bad("Shift not found.", 404);
       await assertShiftDsrEditable(client, current.rows[0], bad);
       const stock = await client.query(
-        `SELECT l.qty, l.product_id, pr.kind
+        `SELECT l.id AS sale_item_id, l.qty, l.product_id, pr.kind
          FROM sale_items l
          JOIN sales s ON s.id = l.sale_id
          LEFT JOIN products pr ON pr.id = l.product_id
@@ -1534,10 +1556,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           );
           continue;
         }
-        await client.query(
-          `UPDATE balances SET on_hand = on_hand + $3 WHERE outlet_id = $1 AND product_id = $2`,
-          [shift.outlet_id, row.product_id, qty],
-        );
+        await moveShopStock(client, shift.outlet_id, row.product_id, qty, { saleItemId: row.sale_item_id, restore: true });
       }
       await client.query(`DELETE FROM sale_items WHERE sale_id IN (SELECT id FROM sales WHERE shift_id = $1)`, [shift.id]);
       await client.query(`DELETE FROM sales WHERE shift_id = $1`, [shift.id]);
