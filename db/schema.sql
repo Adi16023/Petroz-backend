@@ -783,6 +783,24 @@ WHERE d.category IN ('capital_investment', 'capital_withdrawal', 'capital_loan')
   AND d.net > 0
 ON CONFLICT (id) DO NOTHING;
 
+CREATE TABLE IF NOT EXISTS contacts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets(id) ON DELETE CASCADE,
+  tab text NOT NULL CHECK (tab IN ('customers', 'business', 'logins')),
+  name text NOT NULL CHECK (length(trim(name)) > 0),
+  company text NOT NULL DEFAULT '',
+  category text NOT NULL,
+  phone text NOT NULL DEFAULT '',
+  email text NOT NULL DEFAULT '',
+  website text NOT NULL DEFAULT '',
+  username text NOT NULL DEFAULT '',
+  password_encrypted text NOT NULL DEFAULT '',
+  notes text NOT NULL DEFAULT '',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS contacts_outlet_tab_idx ON contacts (outlet_id, tab);
+
 INSERT INTO transactions (outlet_id, capital_id, kind, party, doc_date, amount, mode, note, status, created_by, created_at)
 SELECT c.outlet_id, c.id, c.kind, c.party, c.doc_date, c.amount, c.mode, c.note, 'posted', c.created_by, c.created_at
 FROM capital c

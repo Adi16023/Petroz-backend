@@ -21,6 +21,16 @@ On an empty database the server creates the tables, then one dealer (Whitefield 
 5. Deploy. Open `https://<service>.onrender.com/health` — it returns `{ "ok": true }`.
 6. `POST https://<service>.onrender.com/api/login` with the owner phone and password. Send the returned token as `Authorization: Bearer <token>` on every other `/api` call.
 
+## Contacts
+
+`contacts` stores all three directory tabs, distinguished by `tab` (`customers`, `business`, `logins`) and scoped by `outlet_id`. Migration creates an empty table; no sample records are inserted. Contacts remain separate from credit customers/users.
+
+Owners and managers may use `GET /api/contacts?outletId=...`, `POST /api/contacts`, `PATCH /api/contacts/:id`, and `DELETE /api/contacts/:id?outletId=...`. Create/update bodies contain `outletId`, `tab`, `name`, `company`, `category`, `phone`, `email`, `website`, `username`, `password`, and `notes`. Updates replace the editable record; tab and outlet cannot be moved. All routes verify outlet access.
+
+Set `CONTACTS_ENCRYPTION_KEY` to a persistent 64-character hex key before saving Website Logins. Passwords are encrypted with AES-256-GCM using a random IV for each write, and decrypted only for authorized API responses with `Cache-Control: no-store`. Preserve this key when deploying or restoring the database. Missing configuration explicitly blocks credential writes/reads, without affecting non-login records.
+
+Run `node --test src/contacts.test.mjs` for isolated contacts validation, encryption, and route tests.
+
 ## Shift cashiers
 
 - Creating or updating a shift requires at least one active cashier (`staff_type = cashier`, staff/manager role) from the outlet's dealer and outlet. Dealer-wide cashiers with no outlet restriction are allowed.
