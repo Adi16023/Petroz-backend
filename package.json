@@ -4,7 +4,7 @@
   "type": "module",
   "scripts": {
     "start": "node src/server.mjs",
-    "test": "node --test src/shift-cashiers.test.mjs src/contacts.test.mjs src/auth.test.mjs src/public-bills.test.mjs db/product-prices.test.mjs",
+    "test": "node --test src/shift-cashiers.test.mjs src/contacts.test.mjs src/auth.test.mjs src/public-bills.test.mjs src/purchase-prices.test.mjs db/product-prices.test.mjs",
     "db:migrate": "node db/migrate.mjs",
     "db:check": "node db/check.mjs"
   },

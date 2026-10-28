@@ -294,6 +294,20 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         for (const line of lines) {
           const product = await productId(req.user, line.productName ?? line.description);
           const received = line.qtyReceived == null || line.qtyReceived === "" ? null : money(line.qtyReceived);
+          if (kind === "purchase" && Object.prototype.hasOwnProperty.call(line, "sellingPrice")) {
+            if (!product) throw bad("Select an existing product to update its purchase and selling prices.");
+            for (const [label, value] of [["purchase rate", line.rate], ["selling price", line.sellingPrice]]) {
+              if ((typeof value !== "number" && typeof value !== "string") || String(value).trim() === "" ||
+                  !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 999999999999.99) {
+                throw bad(`Enter a valid ${label}.`);
+              }
+            }
+            await client.query(
+              `UPDATE products SET purchase_price = $3, selling_price = $4, price_at = clock_timestamp()
+               WHERE id = $1 AND settings_id = $2`,
+              [product, outlet.settings_id, Number(line.rate), Number(line.sellingPrice)],
+            );
+          }
           await client.query(
             `INSERT INTO purchase_items (purchase_id, product_id, equipment_id, description, qty, rate, amount, qty_received)
              VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
