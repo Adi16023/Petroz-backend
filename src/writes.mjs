@@ -3,6 +3,7 @@ import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
 import { assertCashierIds, assertShiftCashiers } from "./shift-cashiers.mjs";
 import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
+import { assertLinkedShiftDsrEditable, assertShiftDsrEditable } from "./shift-dsr-lock.mjs";
 
 const PAY_MODES = ["cash", "upi", "card", "credit", "neft", "rtgs", "imps", "cheque", "bank"];
 const STAFF_TYPES = ["cashier", "pump_boy", "supervisor", "air_boy", "dsm", "custom"];
@@ -668,10 +669,11 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       ["banking", null, null],
     ];
     for (const [table, child, fk] of targets) {
-      const found = await pool.query(`SELECT id, outlet_id FROM ${table} WHERE id = $1`, [req.params.id]);
+      const found = await pool.query(`SELECT id, outlet_id, shift_id FROM ${table} WHERE id = $1`, [req.params.id]);
       const row = found.rows[0];
       if (!row) continue;
-      await assertOutlet(pool, req.user, row.outlet_id);
+      const outlet = await assertOutlet(pool, req.user, row.outlet_id);
+      if (row.shift_id) await assertLinkedShiftDsrEditable(pool, row.shift_id, outlet.id, bad);
       if (table === "documents") {
         const document = await pool.query(
           `SELECT 1 FROM documents WHERE id = $1 AND kind = 'adjustment' AND category = 'opening_cash'`,
@@ -1126,6 +1128,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
 
   app.post("/api/readings", wrap(async (req, res) => {
     const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+    if (req.body?.shiftId) await assertLinkedShiftDsrEditable(pool, req.body.shiftId, outlet.id, bad);
     const kind = req.body?.kind;
     if (!["opening", "closing", "dip"].includes(kind)) throw bad("Unknown reading kind.");
     const equipment = await pool.query(
@@ -1490,6 +1493,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const client = await pool.connect();
     try {
       await client.query("BEGIN");
+      const current = await client.query(`SELECT * FROM shifts WHERE id = $1 FOR UPDATE`, [shift.id]);
+      if (!current.rows[0]) throw bad("Shift not found.", 404);
+      await assertShiftDsrEditable(client, current.rows[0], bad);
       const stock = await client.query(
         `SELECT l.qty, l.product_id, pr.kind
          FROM sale_items l
@@ -1558,6 +1564,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       shift = found.rows[0];
       if (!shift) throw bad("Shift not found.", 404);
       const outlet = await assertOutlet(client, req.user, shift.outlet_id);
+      await assertShiftDsrEditable(client, shift, bad);
       const validatedCashiers = await assertCashierIds(client, body.cashierIds !== undefined ? body.cashierIds : shift.entry?.cashierIds, outlet, bad);
       let duties = Array.isArray(shift.duties) ? shift.duties : [];
       if (body.assign?.partyId && Array.isArray(body.assign.nozzleIds)) {

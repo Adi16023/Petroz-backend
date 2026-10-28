@@ -1,3 +1,5 @@
+import { assertShiftDsrEditable } from "./shift-dsr-lock.mjs";
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export async function assertCashierIds(db, value, outlet, bad) {
@@ -30,6 +32,7 @@ export async function assertShiftCashiers(db, shiftId, outlet, bad, lock = false
   );
   const shift = rows[0];
   if (!shift) throw bad("Shift not found on this outlet.", 404);
+  await assertShiftDsrEditable(db, shift, bad);
   await assertCashierIds(db, shift.entry?.cashierIds, outlet, bad);
   return shift;
 }

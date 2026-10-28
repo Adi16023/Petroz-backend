@@ -12,10 +12,10 @@ const shiftId = "00000000-0000-4000-8000-000000000005";
 const dealerId = "00000000-0000-4000-8000-000000000006";
 const docId = "00000000-0000-4000-8000-000000000007";
 const nozzleId = "00000000-0000-4000-8000-000000000008";
-const user = { id: dealerId, role: "owner", settings_id: outlet.settings_id };
+const user = { id: dealerId, name: "Dealer", role: "owner", settings_id: outlet.settings_id };
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, closedShiftReadings } = {}) {
+function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, closedShiftReadings, outletAllowed = true, failActivity = false, dsrDays = [] } = {}) {
   const calls = [];
   const shift = {
     id: shiftId, outlet_id: outlet.id, label: "Morning", status: "open",
@@ -24,6 +24,16 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
   };
   const query = async (sql, params = []) => {
     calls.push({ sql, params });
+    if (failActivity && sql.includes("INSERT INTO activity")) throw new Error("Activity could not be saved.");
+    if (sql.includes("kind = 'dsr' AND status = 'locked'")) {
+      assert.match(sql, /outlet_id = \$1/);
+      assert.match(sql, /doc_date BETWEEN/);
+      assert.match(sql, /AT TIME ZONE 'Asia\/Kolkata'/);
+      const day = (value) => new Date(value).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" });
+      return { rows: dsrDays.filter((row) =>
+        row.outletId === params[0] && row.status === "locked" &&
+        row.day >= day(params[1]) && row.day <= day(params[2])) };
+    }
     if (sql.includes("SELECT * FROM shifts")) return { rows: missingShift ? [] : [shift] };
     if (sql.includes("SELECT id, name, kind FROM products")) return { rows: [{ id: docId, name: "Petrol", kind: "fuel" }] };
     if (sql.includes("SELECT id, name FROM users")) {
@@ -85,16 +95,207 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
     pool, wrap: (handler) => handler, bad,
     assertOutlet: async (_pool, _user, id) => {
       assert.equal(id, outlet.id);
+      if (!outletAllowed) throw bad("This pump is not on your desk.", 403);
       return outlet;
     },
   });
-  async function request(route, body = {}) {
+  async function request(route, body = {}, actor = user) {
     const response = { statusCode: 200, body: null, status(code) { this.statusCode = code; return this; }, json(value) { this.body = value; } };
-    await routes.get(route)({ user, body, params: { id: route.includes("documents") ? docId : shiftId } }, response);
+    await routes.get(route)({ user: actor, body, params: { id: route.includes("documents") ? docId : shiftId } }, response);
     return response;
   }
   return { calls, shift, pool, request };
 }
+
+const receiptId = "00000000-0000-4000-8000-000000000009";
+const secondReceiptId = "00000000-0000-4000-8000-000000000010";
+const receiptBody = { id: receiptId, counts: { "500": 2, coins: 5.5 }, cashTotal: 10000, knownReceiptIds: [] };
+const receiptRoute = "post /api/shifts/:id/cash-receipts";
+const lockedDsr = { id: docId, outletId: outlet.id, day: "2026-10-23", status: "locked" };
+
+test("locked DSR blocks every closed-shift edit path before writes, but permits viewing", async () => {
+  for (const [route, body] of [
+    ["put /api/shifts/:id/entry", {}],
+    [receiptRoute, receiptBody],
+    ["patch /api/shifts/:id", { status: "open", startsAt: "2026-10-24T06:00:00Z" }],
+    ["delete /api/shifts/:id", {}],
+    ["post /api/documents", { outletId: outlet.id, shiftId, kind: "expense", amount: 10 }],
+    ["patch /api/documents/:id", { amount: 10 }],
+    ["delete /api/documents/:id", { reason: "Delete" }],
+    ["post /api/readings", { outletId: outlet.id, shiftId, kind: "closing", qty: 100 }],
+  ]) {
+    const h = harness({ dsrDays: [lockedDsr], documentTable: "expenses" });
+    h.shift.status = "closed";
+    await assert.rejects(h.request(route, body), { status: 423, message: /DSR is locked/ });
+    assert.equal(h.calls.some(({ sql }) => /^\s*(INSERT|UPDATE|DELETE)\b/.test(sql)), false, route);
+  }
+  const h = harness({ dsrDays: [lockedDsr] });
+  h.shift.status = "closed";
+  const viewed = await h.request("get /api/shifts/:id/entry");
+  assert.equal(viewed.body.shift.dsrLocked, true);
+  assert.equal(viewed.body.shift.status, "closed");
+});
+
+test("DSR lock does not affect open or upcoming shifts, including when they are being closed", async () => {
+  for (const status of ["open", "upcoming"]) {
+    for (const [route, body] of [
+      ["put /api/shifts/:id/entry", {}],
+      [receiptRoute, receiptBody],
+      ["patch /api/shifts/:id", { label: "Updated" }],
+      ["put /api/shifts/:id/entry", { submit: true }],
+    ]) {
+      const h = harness({ dsrDays: [lockedDsr] });
+      h.shift.status = status;
+      const response = await h.request(route, body);
+      assert.ok(response.statusCode < 400, `${status}: ${route}`);
+    }
+  }
+});
+
+test("unlocking DSR restores editing for closed shifts", async () => {
+  const dsr = { ...lockedDsr };
+  const h = harness({ dsrDays: [dsr] });
+  h.shift.status = "closed";
+  await assert.rejects(h.request("put /api/shifts/:id/entry"), { status: 423 });
+  dsr.status = "open";
+  const viewed = await h.request("get /api/shifts/:id/entry");
+  assert.equal(viewed.body.shift.dsrLocked, false);
+  await h.request("put /api/shifts/:id/entry");
+  await h.request(receiptRoute, receiptBody);
+  assert.ok(h.calls.some(({ sql }) => sql.includes("UPDATE shifts")));
+});
+
+test("DSR locks are scoped to the shift outlet and dates, including overnight shifts in IST", async () => {
+  for (const dsr of [
+    { ...lockedDsr, outletId: dealerId },
+    { ...lockedDsr, day: "2026-10-22" },
+    { ...lockedDsr, day: "2026-10-24" },
+  ]) {
+    const h = harness({ dsrDays: [dsr] });
+    h.shift.status = "closed";
+    assert.equal((await h.request("get /api/shifts/:id/entry")).body.shift.dsrLocked, false);
+    await h.request("put /api/shifts/:id/entry");
+  }
+  const overnight = harness({ dsrDays: [{ ...lockedDsr, day: "2026-10-24" }] });
+  Object.assign(overnight.shift, { status: "closed", starts_at: "2026-10-23T12:30:00Z", ends_at: "2026-10-23T20:30:00Z" });
+  await assert.rejects(overnight.request("put /api/shifts/:id/entry"), { status: 423 });
+});
+
+test("cash received atomically appends denominations with the actual actor and adds to the existing cash total", async () => {
+  const h = harness();
+  h.shift.entry.totals = { cash: 10000, upi: 1000 };
+  h.shift.expected_cash = 9500;
+  const response = await h.request(receiptRoute, { ...receiptBody, userId: cashierId, userName: "Forged", at: "2000-01-01" });
+  assert.equal(response.statusCode, 201);
+  assert.equal(response.body.cashTotal, 11005.5);
+  assert.equal(response.body.expectedCash, 10505.5);
+  assert.equal(response.body.declaredCash, null);
+  const [receipt] = response.body.cashReceipts;
+  assert.equal(receipt.userId, user.id);
+  assert.equal(receipt.userName, user.name);
+  assert.ok(Math.abs(Date.now() - Date.parse(receipt.at)) < 5000);
+  assert.equal(receipt.counts["500"], 2);
+  assert.equal(receipt.counts["10"], 0);
+  assert.equal(receipt.counts.coins, 5.5);
+  assert.equal(receipt.amount, 1005.5);
+  const update = h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb"));
+  const saved = JSON.parse(update.params[1]);
+  assert.equal(saved.totals.upi, 1000);
+  assert.deepEqual(saved.cashReceipts, [receipt]);
+  const activity = h.calls.find(({ sql }) => sql.includes("INSERT INTO activity"));
+  assert.equal(activity.params[1], user.id);
+  assert.equal(activity.params[2], "cash_received");
+  assert.ok(h.calls.findIndex(({ sql }) => sql === "BEGIN") < h.calls.indexOf(update));
+  assert.ok(h.calls.indexOf(activity) < h.calls.findIndex(({ sql }) => sql === "COMMIT"));
+  assert.equal(h.calls.at(-1).sql, "RELEASE");
+});
+
+test("cash receipt retries are idempotent and do not duplicate cash or activity", async () => {
+  const h = harness();
+  const initial = await h.request(receiptRoute, receiptBody);
+  h.shift.entry = JSON.parse(h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb")).params[1]);
+  const writes = h.calls.filter(({ sql }) => sql.startsWith("UPDATE shifts") || sql.includes("INSERT INTO activity")).length;
+  const retry = await h.request(receiptRoute, receiptBody);
+  assert.equal(retry.statusCode, 200);
+  assert.equal(retry.body.cashTotal, initial.body.cashTotal);
+  assert.equal(retry.body.cashReceipts.length, 1);
+  assert.equal(h.calls.filter(({ sql }) => sql.startsWith("UPDATE shifts") || sql.includes("INSERT INTO activity")).length, writes);
+  await assert.rejects(h.request(receiptRoute, { ...receiptBody, counts: { "500": 3 } }), { status: 409 });
+});
+
+test("cash receipts from another session are included once when adding or saving a stale entry", async () => {
+  const h = harness();
+  const first = await h.request(receiptRoute, receiptBody);
+  h.shift.entry = JSON.parse(h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb")).params[1]);
+  const second = await h.request(receiptRoute, { ...receiptBody, id: secondReceiptId, counts: { "100": 2 } }, { ...user, id: cashierId, name: "Ravi", role: "staff" });
+  assert.equal(second.body.cashTotal, 11205.5);
+  assert.deepEqual(second.body.cashReceipts.map((receipt) => receipt.userName), ["Dealer", "Ravi"]);
+  h.shift.entry = JSON.parse(h.calls.filter(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb")).at(-1).params[1]);
+  await h.request("put /api/shifts/:id/entry", {
+    entry: { totals: { cash: first.body.cashTotal }, cashReceiptIds: [receiptId], cashReceipts: [{ userName: "Forged" }] },
+  });
+  const saved = JSON.parse(h.calls.filter(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb")).at(-1).params[1]);
+  assert.equal(saved.totals.cash, 11205.5);
+  assert.deepEqual(saved.cashReceipts, second.body.cashReceipts);
+});
+
+test("saving a loaded shift preserves receipts without adding their totals again", async () => {
+  const h = harness();
+  const added = await h.request(receiptRoute, receiptBody);
+  h.shift.entry = JSON.parse(h.calls.find(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb")).params[1]);
+  await h.request("put /api/shifts/:id/entry", { entry: { totals: { cash: added.body.cashTotal }, cashReceiptIds: [receiptId] } });
+  const saved = JSON.parse(h.calls.filter(({ sql }) => sql.includes("UPDATE shifts SET entry = $2::jsonb")).at(-1).params[1]);
+  assert.equal(saved.totals.cash, 11005.5);
+  assert.deepEqual(saved.cashReceipts, added.body.cashReceipts);
+  const reloaded = await h.request("get /api/shifts/:id/entry");
+  assert.deepEqual(reloaded.body.cashReceipts, added.body.cashReceipts);
+});
+
+test("cash receipt validation rejects invalid denominations and zero amounts before writing", async () => {
+  for (const counts of [null, [], {}, { "100": -1 }, { "100": 1.5 }, { "100": "2" }, { "500": 100001 }, { "2000": 1 }, { coins: -1 }, { coins: 0.001 }, { coins: Infinity }]) {
+    const h = harness();
+    await assert.rejects(h.request(receiptRoute, { ...receiptBody, counts }), { status: 400 });
+    assert.equal(h.calls.some(({ sql }) => sql.startsWith("UPDATE shifts")), false);
+  }
+  const h = harness();
+  await assert.rejects(h.request(receiptRoute, { ...receiptBody, cashTotal: -1 }), { status: 400 });
+  assert.ok(h.calls.some(({ sql }) => sql === "ROLLBACK"));
+  assert.equal(h.calls.some(({ sql }) => sql === "COMMIT"), false);
+});
+
+test("cash received enforces roles, outlet access and valid cashier assignments", async () => {
+  const forbidden = harness();
+  await assert.rejects(forbidden.request(receiptRoute, receiptBody, { ...user, role: "auditor" }), { status: 403 });
+  assert.equal(forbidden.calls.length, 0);
+  const unassigned = harness({ cashierIds: [] });
+  await assert.rejects(unassigned.request(receiptRoute, receiptBody), { status: 400 });
+  assert.ok(unassigned.calls.some(({ sql }) => sql === "ROLLBACK"));
+  assert.equal(unassigned.calls.some(({ sql }) => sql.startsWith("UPDATE shifts")), false);
+  const missing = harness({ missingShift: true });
+  await assert.rejects(missing.request(receiptRoute, receiptBody), { status: 404 });
+  const denied = harness({ outletAllowed: false });
+  await assert.rejects(denied.request(receiptRoute, receiptBody), { status: 403 });
+  assert.equal(denied.calls.some(({ sql }) => sql === "BEGIN"), false);
+});
+
+test("cash receipt activity failures roll back the cash update and release the connection", async () => {
+  const h = harness({ failActivity: true });
+  await assert.rejects(h.request(receiptRoute, receiptBody), /Activity could not be saved/);
+  assert.ok(h.calls.some(({ sql }) => sql.startsWith("UPDATE shifts")));
+  assert.ok(h.calls.some(({ sql }) => sql === "ROLLBACK"));
+  assert.equal(h.calls.some(({ sql }) => sql === "COMMIT"), false);
+  assert.equal(h.calls.at(-1).sql, "RELEASE");
+});
+
+test("adding cash on a closed shift preserves its status and cash variance", async () => {
+  const h = harness();
+  Object.assign(h.shift, { status: "closed", expected_cash: 10000, declared_cash: 9900 });
+  h.shift.entry.totals = { cash: 10000 };
+  const response = await h.request(receiptRoute, receiptBody);
+  assert.equal(response.body.expectedCash, 11005.5);
+  assert.equal(response.body.declaredCash, 10905.5);
+  assert.equal(h.shift.status, "closed");
+});
 
 const shiftBody = {
   outletId: outlet.id, label: "Morning", startsAt: "2026-10-23T06:00:00Z", endsAt: "2026-10-23T14:00:00Z",

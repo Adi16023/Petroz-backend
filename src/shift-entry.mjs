@@ -1,6 +1,7 @@
 import { assertShiftCashiers, withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
 import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
+import { isShiftDsrLocked } from "./shift-dsr-lock.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -44,6 +45,39 @@ function cashCountOf(raw) {
   const coins = num(source.coins);
   count.coins = coins == null || coins < 0 ? 0 : Math.round(coins * 100) / 100;
   return count;
+}
+
+function receiptCounts(raw, bad, round2) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw bad("Enter cash denominations.");
+  if (Object.keys(raw).some((key) => ![...CASH_NOTES.map(String), "coins"].includes(key))) {
+    throw bad("Unknown cash denomination.");
+  }
+  const counts = {};
+  for (const note of CASH_NOTES) {
+    const quantity = raw[String(note)] ?? 0;
+    if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 0 || quantity > 100000) {
+      throw bad("Note quantities must be whole numbers between 0 and 100000.");
+    }
+    counts[String(note)] = quantity;
+  }
+  const coins = raw.coins ?? 0;
+  if (typeof coins !== "number" || !Number.isFinite(coins) || coins < 0 || coins > 50000000 || Math.abs(round2(coins) - coins) > 0.000001) {
+    throw bad("Enter a valid coin amount with up to two decimal places.");
+  }
+  counts.coins = round2(coins);
+  return counts;
+}
+
+function receiptCashTotal(savedEntry, cashTotal, knownIds, bad, round2) {
+  if (typeof cashTotal !== "number" || !Number.isFinite(cashTotal) || cashTotal < 0 || cashTotal > 1000000000000) {
+    throw bad("Enter a valid Cash total.");
+  }
+  const receipts = savedEntry.cashReceipts ?? [];
+  if (!Array.isArray(knownIds) || knownIds.some((id) => !receipts.some((receipt) => receipt.id === id))) {
+    throw bad("Reload this shift before saving cash receipts.", 409);
+  }
+  const unseen = receipts.filter((receipt) => !knownIds.includes(receipt.id));
+  return round2(cashTotal + unseen.reduce((sum, receipt) => sum + receipt.amount, 0));
 }
 
 function amountMap(source) {
@@ -467,6 +501,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         startsAt: shift.starts_at,
         endsAt: shift.ends_at,
         status: shift.status,
+        dsrLocked: await isShiftDsrLocked(pool, shift),
         expectedCash: num(shift.expected_cash) ?? 0,
         declaredCash: num(shift.declared_cash),
         entry: shift.entry && typeof shift.entry === "object" ? shift.entry : {},
@@ -585,12 +620,66 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           }))
         : creditSalesOf(shift.entry?.creditSales),
       creditReceipts: creditReceiptsOf(shift.entry?.creditReceipts),
+      cashReceipts: savedEntry.cashReceipts ?? [],
     };
   }
 
   app.get("/api/shifts/:id/entry", wrap(async (req, res) => {
     const { shift, outlet } = await loadShift(req, req.params.id);
     res.json(await bundle(shift, outlet.settings_id));
+  }));
+
+  app.post("/api/shifts/:id/cash-receipts", wrap(async (req, res) => {
+    if (!["super_admin", "owner", "manager", "staff"].includes(req.user.role)) {
+      throw bad("You cannot add cash received.", 403);
+    }
+    const { shift, outlet } = await loadShift(req, req.params.id);
+    const id = uuidOrNull(req.body?.id);
+    if (!id) throw bad("A valid cash receipt ID is required.");
+    const counts = receiptCounts(req.body?.counts, bad, round2);
+    const amount = round2(CASH_NOTES.reduce((sum, note) => sum + note * counts[String(note)], 0) + counts.coins);
+    if (amount <= 0) throw bad("Enter cash received greater than zero.");
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+      const current = await assertShiftCashiers(client, shift.id, outlet, bad, true);
+      const entry = { ...current.entry };
+      const receipts = entry.cashReceipts ?? [];
+      const existing = receipts.find((receipt) => receipt.id === id);
+      if (existing && (existing.userId !== req.user.id || JSON.stringify(existing.counts) !== JSON.stringify(counts))) {
+        throw bad("This cash receipt ID has already been used.", 409);
+      }
+      let expectedCash = num(current.expected_cash) ?? 0;
+      let declaredCash = num(current.declared_cash);
+      let cashTotal = num(entry.totals?.cash) ?? 0;
+      if (!existing) {
+        cashTotal = round2(receiptCashTotal(entry, req.body?.cashTotal, req.body?.knownReceiptIds, bad, round2) + amount);
+        const receipt = { id, userId: req.user.id, userName: req.user.name, at: new Date().toISOString(), counts, amount };
+        const delta = round2(cashTotal - (num(entry.totals?.cash) ?? 0));
+        expectedCash = round2(expectedCash + delta);
+        if (declaredCash != null) declaredCash = round2(declaredCash + delta);
+        entry.totals = { ...entry.totals, cash: cashTotal };
+        entry.cashReceipts = [...receipts, receipt];
+        await client.query(
+          `UPDATE shifts SET entry = $2::jsonb, expected_cash = $3, declared_cash = $4 WHERE id = $1`,
+          [shift.id, JSON.stringify(entry), expectedCash, declaredCash],
+        );
+        await client.query(
+          `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [outlet.id, req.user.id, "cash_received", `Cash received: ${amount.toFixed(2)}`, "shifts", shift.id],
+        );
+      }
+      await client.query("COMMIT");
+      res.status(existing ? 200 : 201).json({
+        cashReceipts: entry.cashReceipts, cashTotal, expectedCash, declaredCash,
+      });
+    } catch (error) {
+      await client.query("ROLLBACK");
+      throw error;
+    } finally {
+      client.release();
+    }
   }));
 
   app.put("/api/shifts/:id/entry", wrap(async (req, res) => {
@@ -620,6 +709,10 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       await client.query("BEGIN");
       const currentShift = await assertShiftCashiers(client, shift.id, outlet, bad, true);
       entry.cashierIds = currentShift.entry.cashierIds;
+      entry.cashReceipts = currentShift.entry.cashReceipts ?? [];
+      if (entry.cashReceipts.length) {
+        entry.totals.cash = receiptCashTotal(currentShift.entry, entry.totals.cash, req.body?.entry?.cashReceiptIds, bad, round2);
+      }
       if (Array.isArray(currentShift.entry.nozzleIds)) entry.nozzleIds = currentShift.entry.nozzleIds;
       const owned = await client.query(
         `SELECT l.qty, l.product_id, l.equipment_id, l.rate, pr.kind

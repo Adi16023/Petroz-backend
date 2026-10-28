@@ -41,6 +41,18 @@ Run `node --test src/contacts.test.mjs` for isolated contacts validation, encryp
 
 Run `npm test` for isolated regression tests; these tests do not connect to a database.
 
+## Shift cash received
+
+`POST /api/shifts/:id/cash-receipts` accepts `id` (a client-generated UUID used for retry deduplication), `counts` (note quantities for `10`, `20`, `50`, `100`, `200`, `500` and a rupee-value `coins` amount), the currently displayed `cashTotal`, and `knownReceiptIds` (receipt IDs already included in that displayed total). It requires outlet access, a valid shift cashier assignment, and an owner, manager, staff, or super-admin session.
+
+The backend validates denominations and calculates each receipt total itself. A transaction locks the shift, appends the receipt to `entry.cashReceipts`, adds it to the Cash total, updates expected/declared cash without changing shift status, and writes activity. The submitting user and timestamp are supplied by the server, not the client. A retry of the same ID and counts returns the saved result without adding cash again.
+
+Entry GET/PUT responses include `cashReceipts`. Entry PUT bodies send `entry.cashReceiptIds` for receipts already included in `entry.totals.cash`. Stored receipts are preserved, never replaced by client-supplied log rows; receipts added by another session since loading are included once in the saved cash total. These logs are distinct from the editable `entry.cashCount` snapshot. No schema migration is required.
+
+## DSR edit lock
+
+A closed shift is read-only when a `documents` row of kind `dsr` is `locked` for the same outlet and any date covered by the shift, using Asia/Kolkata dates (including overnight shifts). Entry GET remains available and returns `shift.dsrLocked`. Shift entry saves, cash receipts, shift edits/deletion, and linked document writes reject locked closed shifts with HTTP 423 and an explicit unlock message. Open and upcoming shifts are unaffected, including their transition to closed; subsequent changes then follow the lock. Unlocking the DSR restores existing closed-shift editing without a migration.
+
 ## Shift meter readings
 
 Shift entry stores each nozzle's opening and closing separately. Shift details, reading lists, and reopened entries use that shift's saved values, not the nozzle's current meter. For older entries affected by identical opening/closing rows, reads recover the opening from the shift's saved `entry.meters` when available; no meter-reading rewrite is performed.
