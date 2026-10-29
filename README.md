@@ -31,6 +31,16 @@ Authenticated `PATCH /api/billing/:id/cancel` with `{ "outletId": "..." }` verif
 
 `node --test src/public-bills.test.mjs` validates migration reruns, token uniqueness, station snapshots, public response fields/headers, unauthenticated reads, protected cancellation, outlet isolation, and revocation using isolated in-memory PostgreSQL.
 
+## Offers
+
+Run `npm run db:migrate` to create the empty `offers` table. No sample offers are seeded. Offer records belong to one outlet and persist across frontend reloads.
+
+Owners (and super admins) can use `GET /api/offers?outletId=...`, `POST /api/offers`, `PATCH /api/offers/:id`, and `DELETE /api/offers/:id?outletId=...`. All routes require authentication and verify outlet access. POST/PATCH bodies contain `outletId`, `name`, `description`, `type` (`fuel`, `product`, `service`, `combo`), `applicable`, `discount` (`litre`, `fixed`, `percent`), `value`, `minimum`, `maximum`, `benefit`, `start`/`end` (YYYY-MM-DD), `audience`, and boolean `enabled`. PATCH replaces the editable fields without moving the offer or changing its server-managed usage/discount totals.
+
+Dates, required text, finite non-negative amounts, percentage limits, and type-specific benefits are validated. Product discounts cannot be per litre. This API manages offers only; it does not apply promotions to billing. `usage` and `given` start at zero.
+
+Run `node --test src/offers.test.mjs` for validation, idempotent migration, real PostgreSQL CRUD, and outlet/role isolation tests against an isolated in-memory database.
+
 ## Contacts
 
 `contacts` stores all three directory tabs, distinguished by `tab` (`customers`, `business`, `logins`) and scoped by `outlet_id`. Migration creates an empty table; no sample records are inserted. Contacts remain separate from credit customers/users.
@@ -42,6 +52,8 @@ Website Login passwords are encrypted with AES-256-GCM using a random IV for eac
 Run `node --test src/contacts.test.mjs` for isolated contacts validation, encryption, and route tests.
 
 ## Shift cashiers
+
+Pump saves reuse an existing active tank for the same outlet and fuel before creating an automatic placeholder. Repeated saves do not create an extra tank or change its stock/capacity. Existing duplicate tanks are not automatically deleted, because they may have readings or transaction history.
 
 - Creating or updating a shift requires at least one active cashier (`staff_type = cashier`, staff/manager role) from the outlet's dealer and outlet. Dealer-wide cashiers with no outlet restriction are allowed.
 - Shift-linked document creation/updates and shift-entry saves reject missing, inactive, non-cashier, or cross-outlet assignments. An existing shift without cashiers must be edited to assign them before entry or closing.

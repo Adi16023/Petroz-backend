@@ -9,6 +9,7 @@ const reshape = fs.readFileSync(path.join(dir, "reshape.sql"), "utf8");
 const sql = fs.readFileSync(path.join(dir, "schema.sql"), "utf8");
 const productPrices = fs.readFileSync(path.join(dir, "product-prices.sql"), "utf8");
 const stockBatches = fs.readFileSync(path.join(dir, "stock-batches.sql"), "utf8");
+const offers = fs.readFileSync(path.join(dir, "offers.sql"), "utf8");
 
 function directUrl(url) {
   if (!url) throw new Error("DATABASE_URL is not set.");
@@ -62,6 +63,7 @@ export async function migrate() {
     await client.query(sql);
     await client.query(productPrices);
     await client.query(stockBatches);
+    await client.query(offers);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");

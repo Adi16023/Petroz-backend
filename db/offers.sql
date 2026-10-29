@@ -1,0 +1,25 @@
+CREATE TABLE IF NOT EXISTS offers (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  outlet_id uuid NOT NULL REFERENCES outlets(id) ON DELETE CASCADE,
+  name text NOT NULL CHECK (length(trim(name)) BETWEEN 1 AND 120),
+  description text NOT NULL DEFAULT '',
+  type text NOT NULL CHECK (type IN ('fuel', 'product', 'service', 'combo')),
+  applicable text NOT NULL CHECK (length(trim(applicable)) > 0),
+  discount text NOT NULL CHECK (discount IN ('litre', 'fixed', 'percent')),
+  value numeric(14,2) NOT NULL CHECK (value >= 0),
+  minimum numeric(14,2) NOT NULL DEFAULT 0 CHECK (minimum >= 0),
+  maximum numeric(14,2) NOT NULL DEFAULT 0 CHECK (maximum >= 0),
+  benefit text NOT NULL DEFAULT '',
+  start_date date NOT NULL,
+  end_date date NOT NULL CHECK (end_date >= start_date),
+  audience text NOT NULL CHECK (length(trim(audience)) > 0),
+  enabled boolean NOT NULL DEFAULT true,
+  usage integer NOT NULL DEFAULT 0 CHECK (usage >= 0),
+  given numeric(14,2) NOT NULL DEFAULT 0 CHECK (given >= 0),
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  CHECK (type NOT IN ('fuel', 'product') OR (value > 0 AND (discount <> 'percent' OR value <= 100))),
+  CHECK (type <> 'product' OR discount <> 'litre'),
+  CHECK (type NOT IN ('service', 'combo') OR length(trim(benefit)) > 0)
+);
+CREATE INDEX IF NOT EXISTS offers_outlet_idx ON offers (outlet_id);

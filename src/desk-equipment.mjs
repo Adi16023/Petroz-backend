@@ -156,6 +156,22 @@ export async function syncDeskEquipment(pool, { settingsId, outletId, desk, scop
       const productId = await productFor(fuel);
       if (!parentId) {
         const { rows } = await pool.query(
+          `SELECT e.id FROM equipment e
+           JOIN products pr ON pr.id = e.product_id
+           WHERE e.outlet_id = $1 AND e.kind = 'tank' AND e.active = true
+             AND pr.settings_id = $2 AND lower(trim(pr.name)) = $3
+           ORDER BY CASE WHEN e.settings_ref LIKE 'tank:auto:%' THEN 1 ELSE 0 END, e.label, e.id
+           LIMIT 1`,
+          [outletId, settingsId, key],
+        );
+        if (rows[0]) {
+          parentId = rows[0].id;
+          tankByFuel.set(key, parentId);
+          keptTanks.push(parentId);
+        }
+      }
+      if (!parentId) {
+        const { rows } = await pool.query(
           `INSERT INTO equipment (outlet_id, product_id, kind, label, capacity, live_qty, settings_ref)
            VALUES ($1, $2, 'tank', $3, 0, 0, $4)
            ON CONFLICT (outlet_id, settings_ref) WHERE settings_ref IS NOT NULL AND settings_ref <> ''

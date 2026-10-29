@@ -713,3 +713,46 @@ test("saving pumps reuses the existing fuel product instead of creating or zeroi
   const lookup = calls.find(({ sql }) => sql.includes("SELECT id FROM products"));
   assert.deepEqual(lookup.params, [outlet.settings_id, "petrol"]);
 });
+
+test("saving pumps reuses configured tanks rather than creating duplicate automatic tanks", async () => {
+  const { PGlite } = await import("@electric-sql/pglite");
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      CREATE TABLE products (id uuid PRIMARY KEY, settings_id uuid, kind text, name text, active boolean, price_at timestamptz, created_at timestamptz);
+      CREATE TABLE equipment (
+        id uuid PRIMARY KEY DEFAULT gen_random_uuid(), outlet_id uuid, product_id uuid, parent_id uuid,
+        kind text, label text, capacity numeric, live_qty numeric, meter numeric, pump_name text,
+        settings_ref text, active boolean DEFAULT true
+      );
+      CREATE UNIQUE INDEX equipment_ref ON equipment(outlet_id, settings_ref) WHERE settings_ref IS NOT NULL AND settings_ref <> '';
+      CREATE TABLE dip_readings (equipment_id uuid, kind text, qty numeric, remarks text, at timestamptz);
+      CREATE TABLE sale_items (equipment_id uuid);
+      CREATE TABLE purchase_items (equipment_id uuid);
+      CREATE TABLE document_items (equipment_id uuid);
+    `);
+    await db.query("INSERT INTO products (id, settings_id, kind, name, active) VALUES ($1,$2,'fuel','Petrol',true)", [docId, outlet.settings_id]);
+    await db.query("INSERT INTO equipment (id,outlet_id,product_id,kind,label,capacity,live_qty) VALUES ($1,$2,$3,'tank','Petrol tank 1',20,10)", [cashierId, outlet.id, docId]);
+    const options = {
+      settingsId: outlet.settings_id, outletId: outlet.id,
+      desk: { pumps: [{ id: "pump", name: "P1", nozzles: [{ fuel: "Petrol", on: true }, { fuel: "Petrol", on: true }] }] },
+      scope: { fuels: false, tanks: false, pumps: true },
+    };
+    await syncDeskEquipment(db, options);
+    await syncDeskEquipment(db, options);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM equipment WHERE kind='tank'")).rows[0].count, 1);
+    const nozzles = (await db.query("SELECT parent_id FROM equipment WHERE kind='nozzle'")).rows;
+    assert.equal(nozzles.length, 2);
+    assert.ok(nozzles.every((row) => row.parent_id === cashierId));
+    const tank = (await db.query("SELECT capacity::float,live_qty::float FROM equipment WHERE id=$1", [cashierId])).rows[0];
+    assert.deepEqual(tank, { capacity: 20, live_qty: 10 });
+
+    await db.exec("DELETE FROM equipment");
+    await syncDeskEquipment(db, options);
+    await syncDeskEquipment(db, options);
+    assert.equal((await db.query("SELECT count(*)::int AS count FROM equipment WHERE kind='tank'")).rows[0].count, 1);
+    const automatic = (await db.query("SELECT id,settings_ref FROM equipment WHERE kind='tank'")).rows[0];
+    assert.equal(automatic.settings_ref, "tank:auto:petrol");
+    assert.ok((await db.query("SELECT parent_id FROM equipment WHERE kind='nozzle'")).rows.every((row) => row.parent_id === automatic.id));
+  } finally { await db.close(); }
+});

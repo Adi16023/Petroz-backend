@@ -12,6 +12,7 @@ import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
 import { registerPublicBills } from "./public-bills.mjs";
 import { registerContacts } from "./contacts.mjs";
+import { registerOffers } from "./offers.mjs";
 import { withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
 
@@ -1892,6 +1893,7 @@ app.get("/api/activity", wrap(async (req, res) => {
 
 registerFiles(app, { pool, wrap, bad, assertOutlet });
 registerContacts(app, { pool, wrap, bad, assertOutlet });
+registerOffers(app, { pool, wrap, bad, assertOutlet });
 registerWrites(app, { pool, wrap, bad, assertOutlet });
 
 function ticketDto(row) {
