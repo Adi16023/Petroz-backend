@@ -51,6 +51,25 @@ Website Login passwords are encrypted with AES-256-GCM using a random IV for eac
 
 Run `node --test src/contacts.test.mjs` for isolated contacts validation, encryption, and route tests.
 
+## Stock variation audits
+
+`npm run db:migrate` creates `stock_audits`, containing outlet-scoped, versioned audit snapshots, actor IDs, draft/submitted status, and submission timestamps. No sample audits are seeded. Audit saves never alter equipment, dip readings, receipts, or sales.
+
+Authenticated owners, managers, auditors, super admins, and staff explicitly granted `tank_dip` (unless revoked) may access these routes, subject to normal outlet authorization:
+
+- `GET /api/stock-audits?outletId=...` lists saved audit summaries.
+- `GET /api/stock-audits/prefill?outletId=...&previousDate=YYYY-MM-DD&auditDate=YYYY-MM-DD&tankId=all` builds an editable snapshot. A tank UUID may replace `all`.
+- `GET /api/stock-audits/:id?outletId=...` opens a saved snapshot.
+- `PUT /api/stock-audits/:id` with `{outletId, version, status, data}` creates at version 0 or updates the exact saved draft version. Updates increment the version atomically. Duplicate creates, stale updates, submitted records, and cross-outlet writes return 409 without overwriting anything.
+
+`data` contains `dealerName`, `sapCode`, `previousDate`, `auditDate`, `tankId`, `fuels`, `notes`, `verifiedBy`, `designation`, and `signature`. Each fuel (`diesel`, `petrol`, `premium`, optional `power`) contains `opening`, `receipts`, `actual`, and `nozzles` with UUID `id`, `label`, `previous`, `current`, and `testing`. Measurements may be null in drafts, not submissions. Families/labels are canonicalized by the server. Inputs, dates, ordering, unique nozzle/fuel IDs, finite non-negative quantities, limits, and submission completeness are validated. Notes are limited to 500 characters. Signature is an optional validated PNG/JPEG data URL up to 2 MB. Submission also requires a verifier name and makes the snapshot immutable.
+
+Prefill reads actual historical closing totalizers and nonpending/nonrejected tank dips, bounded by the outlet's IST business-day cutoff. Stock quantities are converted to litres using the application's existing stored-KL convention. Receipt/testing totals follow saved document dates, excluding draft/rejected/cancelled/reversed documents. Missing historical values remain null; ambiguous unassigned receipts are not guessed when one of several same-fuel tanks is selected.
+
+The frontend computes and exports the reference workbook formulas: nozzle sales minus dip sales, 4% of actual stock for tank allowance, and shortage-only evaporation of 0.2% for diesel / 0.75% for petrol. Signed combined allowances determine whether variation is within limits. These are audit calculations only, not automatic stock adjustments.
+
+`node --test src/stock-audits.test.mjs` verifies migration reruns, validation, draft/submission persistence, version conflicts, submitted locking, outlet/role checks, missing measurements, and exact business-day boundaries in isolated PostgreSQL.
+
 ## Shift cashiers
 
 Pump saves reuse an existing active tank for the same outlet and fuel before creating an automatic placeholder. Repeated saves do not create an extra tank or change its stock/capacity. Existing duplicate tanks are not automatically deleted, because they may have readings or transaction history.
