@@ -321,7 +321,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         ...duties.map((duty) => duty.nozzleId),
       ].map((id) => uuidOrNull(id)).filter(Boolean),
     )];
-    const [nozzles, readings, openingReadings, lastClosedReadings, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent, creditPeople, tempPeople, shiftCredits] = await Promise.all([
+    const [nozzles, readings, openingReadings, priorClosingReadings, fuel, lubes, payments, expenses, adjustment, history, products, staff, recent, creditPeople, tempPeople, shiftCredits] = await Promise.all([
       pool.query(
         `SELECT e.id, e.label, e.meter, e.product_id, pr.name AS product_name, pr.unit, pr.selling_price, pr.price_at
          FROM equipment e
@@ -353,8 +353,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
          FROM dip_readings r
          JOIN shifts s ON s.id = r.shift_id
          WHERE r.kind = 'closing'
-           AND s.outlet_id = $1 AND s.id <> $2 AND s.status = 'closed'
-         ORDER BY r.equipment_id, s.closed_at DESC NULLS LAST, r.at DESC, s.id DESC`,
+           AND s.outlet_id = $1 AND s.id <> $2 AND s.status IN ('open', 'closed')
+         ORDER BY r.equipment_id, COALESCE(s.closed_at, r.at) DESC, r.at DESC, s.id DESC`,
         [outletId, shift.id],
       ),
       pool.query(
@@ -475,7 +475,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const opening = new Map(readings.rows.filter((row) => row.kind === "opening").map((row) => [row.equipment_id, num(shiftReadingQty(row, savedEntry))]));
     const closing = new Map(readings.rows.filter((row) => row.kind === "closing").map((row) => [row.equipment_id, num(row.qty)]));
     const openingMeters = new Map(openingReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
-    const lastClosed = new Map(lastClosedReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
+    const priorClosing = new Map(priorClosingReadings.rows.map((row) => [row.equipment_id, num(row.qty) ?? 0]));
     const fuelByNozzle = new Map(fuel.rows.map((row) => [row.equipment_id, row]));
     const recentByNozzle = new Map();
     for (const row of recent.rows) {
@@ -510,7 +510,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         employeeCode: row.employee_code,
       })),
       nozzles: nozzles.rows.map((row) => {
-        const fromPrior = lastClosed.has(row.id) ? lastClosed.get(row.id) ?? 0 : null;
+        const fromPrior = priorClosing.has(row.id) ? priorClosing.get(row.id) ?? 0 : null;
         const baseline = fromPrior != null ? fromPrior : openingMeters.has(row.id) ? openingMeters.get(row.id) ?? 0 : num(row.meter) ?? 0;
         const line = fuelByNozzle.get(row.id);
         const ownRate = num(savedEntry.fuelRates?.[row.id]) ?? (line ? num(line.rate) : null);

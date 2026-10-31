@@ -15,7 +15,7 @@ const nozzleId = "00000000-0000-4000-8000-000000000008";
 const user = { id: dealerId, name: "Dealer", role: "owner", settings_id: outlet.settings_id };
 const bad = (message, status = 400) => Object.assign(new Error(message), { status });
 
-function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, closedShiftReadings, outletAllowed = true, failActivity = false, dsrDays = [], ownedShopSales = [], shopProduct = null } = {}) {
+function harness({ cashierIds = [cashierId], validCashiers = true, documentTable, missingShift = false, expenseHistory = [], nozzles = [], readings = [], priorReadings = [], fuelLines = [], invalidFuelRate = false, shiftClosingReadings, shiftClosingDb, outletAllowed = true, failActivity = false, dsrDays = [], ownedShopSales = [], shopProduct = null } = {}) {
   const calls = [];
   const shift = {
     id: shiftId, outlet_id: outlet.id, label: "Morning", status: "open",
@@ -59,14 +59,15 @@ function harness({ cashierIds = [cashierId], validCashiers = true, documentTable
     if (sql.includes("SELECT equipment_id, kind, qty FROM dip_readings")) return { rows: readings };
     if (sql.includes("SELECT DISTINCT ON (r.equipment_id)")) {
       assert.match(sql, /r.kind = 'closing'/);
-      assert.match(sql, /s.status = 'closed'/);
-      assert.match(sql, /s.closed_at DESC NULLS LAST, r.at DESC/);
+      assert.match(sql, /s.status IN \('open', 'closed'\)/);
+      assert.match(sql, /COALESCE\(s.closed_at, r.at\) DESC, r.at DESC/);
       assert.equal(sql.includes("starts_at"), false);
       assert.deepEqual(params, [outlet.id, shiftId]);
-      if (closedShiftReadings) {
-        const candidates = closedShiftReadings.filter((row) =>
-          row.outlet_id === params[0] && row.shift_id !== params[1] && row.status === "closed");
-        candidates.sort((a, b) => Date.parse(b.closed_at) - Date.parse(a.closed_at));
+      if (shiftClosingDb) return shiftClosingDb.query(sql, params);
+      if (shiftClosingReadings) {
+        const candidates = shiftClosingReadings.filter((row) =>
+          row.outlet_id === params[0] && row.shift_id !== params[1] && ["open", "closed"].includes(row.status));
+        candidates.sort((a, b) => Date.parse(b.closed_at ?? b.at) - Date.parse(a.closed_at ?? a.at));
         const byNozzle = new Map();
         for (const row of candidates) if (!byNozzle.has(row.equipment_id)) byNozzle.set(row.equipment_id, row);
         return { rows: [...byNozzle.values()] };
@@ -639,10 +640,10 @@ test("carry-forward follows actual closure order, not the shifts' scheduled time
   };
   const h = harness({
     nozzles: [{ id: nozzleId, label: "Pump 1", meter: 99999 }],
-    closedShiftReadings: [
+    shiftClosingReadings: [
       { ...row, shift_id: "morning" },
       { ...row, shift_id: "late-night", starts_at: "2026-10-22T22:00:00Z", closed_at: "2026-10-23T10:00:00Z", qty: 12500 },
-      { ...row, shift_id: "unclosed", status: "open", closed_at: "2026-10-23T12:00:00Z", qty: 14000 },
+      { ...row, shift_id: "upcoming", status: "upcoming", closed_at: null, at: "2026-10-23T12:00:00Z", qty: 14000 },
       { ...row, shift_id: "other-outlet", outlet_id: "another-outlet", closed_at: "2026-10-23T13:00:00Z", qty: 15000 },
       { ...row, shift_id: shiftId, closed_at: "2026-10-23T14:00:00Z", qty: 16000 },
     ],
@@ -650,6 +651,61 @@ test("carry-forward follows actual closure order, not the shifts' scheduled time
   const response = await h.request("get /api/shifts/:id/entry");
   assert.equal(response.body.nozzles[0].opening, 12500);
   assert.equal(response.body.nozzles[0].closing, 12500);
+});
+
+test("new shift entries carry saved closings from open shifts using real PostgreSQL queries", async () => {
+  const { PGlite } = await import("@electric-sql/pglite");
+  const db = new PGlite();
+  try {
+    await db.exec(`
+      CREATE TABLE shifts (id uuid PRIMARY KEY, outlet_id uuid, status text, closed_at timestamptz);
+      CREATE TABLE dip_readings (shift_id uuid, equipment_id uuid, kind text, qty numeric, at timestamptz);
+    `);
+    const previousId = "00000000-0000-4000-8000-000000000011";
+    const closedId = "00000000-0000-4000-8000-000000000012";
+    const otherId = "00000000-0000-4000-8000-000000000013";
+    const upcomingId = "00000000-0000-4000-8000-000000000014";
+    const secondNozzleId = "00000000-0000-4000-8000-000000000015";
+    for (const [id, outletId, status, closedAt] of [
+      [previousId, outlet.id, "open", null],
+      [closedId, outlet.id, "closed", "2026-10-23T08:00:00Z"],
+      [otherId, secondCashierId, "open", null],
+      [upcomingId, outlet.id, "upcoming", null],
+      [shiftId, outlet.id, "open", null],
+    ]) {
+      await db.query("INSERT INTO shifts VALUES ($1,$2,$3,$4)", [id, outletId, status, closedAt]);
+    }
+    for (const [id, equipmentId, kind, qty, at] of [
+      [closedId, nozzleId, "closing", 12000, "2026-10-23T07:00:00Z"],
+      [previousId, nozzleId, "opening", 12000, "2026-10-23T09:00:00Z"],
+      [previousId, nozzleId, "closing", 12450, "2026-10-23T09:00:00Z"],
+      [previousId, nozzleId, "closing", 12500, "2026-10-23T10:00:00Z"],
+      [previousId, secondNozzleId, "closing", 0, "2026-10-23T10:00:00Z"],
+      [otherId, nozzleId, "closing", 13000, "2026-10-23T11:00:00Z"],
+      [upcomingId, nozzleId, "closing", 14000, "2026-10-23T12:00:00Z"],
+      [shiftId, nozzleId, "closing", 15000, "2026-10-23T13:00:00Z"],
+    ]) {
+      await db.query("INSERT INTO dip_readings VALUES ($1,$2,$3,$4,$5)", [id, equipmentId, kind, qty, at]);
+    }
+    const h = harness({
+      nozzles: [
+        { id: nozzleId, label: "Pump 1", meter: 99999 },
+        { id: secondNozzleId, label: "Pump 2", meter: 99999 },
+      ],
+      shiftClosingDb: db,
+    });
+    const response = await h.request("get /api/shifts/:id/entry");
+    assert.deepEqual(response.body.nozzles.map(({ opening, closing, qty }) => ({ opening, closing, qty })), [
+      { opening: 12500, closing: 12500, qty: 0 },
+      { opening: 0, closing: 0, qty: 0 },
+    ]);
+    h.shift.entry.meters = { [nozzleId]: 11000 };
+    const saved = await h.request("get /api/shifts/:id/entry");
+    assert.equal(saved.body.nozzles[0].opening, 11000);
+    assert.equal((await db.query("SELECT status, closed_at FROM shifts WHERE id=$1", [previousId])).rows[0].status, "open");
+  } finally {
+    await db.close();
+  }
 });
 
 test("explicit closure timestamps actual closure and preserves the timestamp on closed-shift edits", async () => {
