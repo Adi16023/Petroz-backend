@@ -337,6 +337,7 @@ CREATE TABLE IF NOT EXISTS sale_items (
   qty numeric(14, 3) NOT NULL DEFAULT 0,
   rate numeric(14, 4) NOT NULL DEFAULT 0,
   amount numeric(14, 2) NOT NULL DEFAULT 0,
+  gst numeric(5, 2),
   test_qty numeric(14, 3) NOT NULL DEFAULT 0
 );
 
@@ -592,6 +593,7 @@ CREATE INDEX IF NOT EXISTS sales_outlet_idx ON sales (outlet_id, doc_date);
 CREATE INDEX IF NOT EXISTS sales_user_idx ON sales (user_id);
 CREATE INDEX IF NOT EXISTS sales_shift_idx ON sales (shift_id);
 ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS test_qty numeric(14, 3) NOT NULL DEFAULT 0;
+ALTER TABLE sale_items ADD COLUMN IF NOT EXISTS gst numeric(5, 2);
 
 CREATE INDEX IF NOT EXISTS sale_items_sale_idx ON sale_items (sale_id);
 CREATE INDEX IF NOT EXISTS purchases_outlet_idx ON purchases (outlet_id, doc_date);

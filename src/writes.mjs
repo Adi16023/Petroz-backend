@@ -3,6 +3,7 @@ import { billDto } from "./public-bills.mjs";
 import { moveShopStock } from "./stock-batches.mjs";
 import { syncDeskEquipment } from "./desk-equipment.mjs";
 import { registerShiftEntry } from "./shift-entry.mjs";
+import { registerExpenseCategories } from "./expense-categories.mjs";
 import { assertCashierIds, assertShiftCashiers } from "./shift-cashiers.mjs";
 import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
 import { assertLinkedShiftDsrEditable, assertShiftDsrEditable } from "./shift-dsr-lock.mjs";
@@ -951,6 +952,38 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       row.id,
     );
     res.json({ id: row.id });
+  }));
+
+
+  app.post("/api/parties/:id/vehicles", wrap(async (req, res) => {
+    const { rows } = await pool.query(
+      `SELECT id, outlet_id, settings_id, role, vehicle, profile
+         FROM users
+        WHERE id = $1 AND ($2::uuid IS NULL OR settings_id = $2)`,
+      [req.params.id, req.user.role === "super_admin" ? null : req.user.settings_id],
+    );
+    const row = rows[0];
+    if (!row) throw bad("Party not found.", 404);
+    if (row.role !== "credit_customer") throw bad("Vehicles belong on credit customers.");
+    if (row.outlet_id) await assertOutlet(pool, req.user, row.outlet_id);
+    const name = String(req.body?.vehicle ?? "").trim().slice(0, 40);
+    if (!name) throw bad("Vehicle number is required.");
+    const profile = row.profile && typeof row.profile === "object" && !Array.isArray(row.profile) ? { ...row.profile } : {};
+    const listed = Array.isArray(profile.vehicles) ? profile.vehicles.map((item) => String(item ?? "").trim()).filter(Boolean) : [];
+    if (row.vehicle && !listed.some((item) => item.toLowerCase() === String(row.vehicle).toLowerCase())) {
+      listed.unshift(String(row.vehicle).trim());
+    }
+    if (!listed.some((item) => item.toLowerCase() === name.toLowerCase())) listed.push(name);
+    profile.vehicles = listed;
+    await pool.query(
+      `UPDATE users
+         SET vehicle = COALESCE(NULLIF(vehicle, ''), $2),
+             profile = $3::jsonb
+       WHERE id = $1`,
+      [row.id, name, JSON.stringify(profile)],
+    );
+    await log(req.user, row.outlet_id, "updated", `Vehicle ${name}`, "users", row.id);
+    res.status(201).json({ id: row.id, vehicles: listed, vehicle: row.vehicle || name });
   }));
 
   app.post("/api/products", wrap(async (req, res) => {
@@ -2157,5 +2190,6 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     res.status(201).json({ id: rows[0].id });
   }));
 
+  registerExpenseCategories(app, { pool, wrap, bad, assertOutlet });
   registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, money, round2, payMode });
 }

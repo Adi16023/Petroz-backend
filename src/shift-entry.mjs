@@ -3,6 +3,7 @@ import { moveShopStock } from "./stock-batches.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
 import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
 import { isShiftDsrLocked } from "./shift-dsr-lock.mjs";
+import { shiftEntryActivityEvents, writeShiftEntryActivity } from "./shift-entry-activity.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -104,6 +105,57 @@ function noteMap(source) {
   return out;
 }
 
+
+function vehiclesOf(row) {
+  const out = [];
+  const seen = new Set();
+  function push(value) {
+    const name = clip(value, 40);
+    if (!name) return;
+    const key = name.toLowerCase();
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push(name);
+  }
+  const profile = row?.profile && typeof row.profile === "object" && !Array.isArray(row.profile) ? row.profile : {};
+  const listed = Array.isArray(row?.vehicles)
+    ? row.vehicles
+    : Array.isArray(profile.vehicles)
+      ? profile.vehicles
+      : [];
+  for (const item of listed) push(item);
+  push(row?.vehicle);
+  return out;
+}
+
+function creditSaleNote(row) {
+  const bits = [];
+  if (row.fuel) bits.push(row.fuel);
+  if (row.qty > 0) bits.push(`${Number(row.qty)} L`);
+  if (row.rate > 0) bits.push(`@ ${Number(row.rate)}`);
+  if (bits.length) return bits.join(" · ");
+  return row.phone || null;
+}
+
+async function rememberVehicle(client, customerId, vehicle) {
+  const name = clip(vehicle, 40);
+  if (!customerId || !name) return;
+  const found = await client.query(`SELECT vehicle, profile FROM users WHERE id = $1`, [customerId]);
+  const row = found.rows[0];
+  if (!row) return;
+  const profile = row.profile && typeof row.profile === "object" && !Array.isArray(row.profile) ? { ...row.profile } : {};
+  const vehicles = vehiclesOf({ vehicle: row.vehicle, profile });
+  if (!vehicles.some((item) => item.toLowerCase() === name.toLowerCase())) vehicles.push(name);
+  profile.vehicles = vehicles;
+  await client.query(
+    `UPDATE users
+       SET vehicle = COALESCE(NULLIF(vehicle, ''), $2),
+           profile = $3::jsonb
+     WHERE id = $1`,
+    [customerId, name, JSON.stringify(profile)],
+  );
+}
+
 function creditSalesOf(raw) {
   const rows = Array.isArray(raw) ? raw : [];
   return rows.slice(0, 80).map((row) => ({
@@ -112,6 +164,9 @@ function creditSalesOf(raw) {
     name: clip(row?.name, 80),
     phone: clip(row?.phone, 20),
     vehicle: clip(row?.vehicle, 40),
+    fuel: clip(row?.fuel, 40),
+    qty: Math.max(0, num(row?.qty) ?? 0),
+    rate: Math.max(0, num(row?.rate) ?? 0),
     amount: Math.max(0, num(row?.amount) ?? 0),
   })).filter((row) => row.name || row.customerId || row.amount > 0);
 }
@@ -205,6 +260,7 @@ async function ensureCreditCustomer(client, outlet, row) {
        WHERE id = $1`,
       [id, name, phone, vehicle],
     );
+    await rememberVehicle(client, id, vehicle);
     return id;
   }
   if (!name) {
@@ -366,7 +422,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       ),
       pool.query(
         `SELECT s.id, s.created_at, s.doc_no, s.mode::text AS mode, s.vehicle, s.note,
-                l.product_id, l.description, l.qty, l.rate, l.amount, pr.name AS product_name, pr.brand, pr.unit
+                l.product_id, l.description, l.qty, l.rate, l.amount, l.gst,
+                pr.name AS product_name, pr.brand, pr.unit, pr.gst AS product_gst
          FROM sales s
          JOIN sale_items l ON l.sale_id = s.id
          LEFT JOIN products pr ON pr.id = l.product_id
@@ -393,8 +450,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         `SELECT id, category, amount, note
          FROM documents
          WHERE shift_id = $1 AND kind = 'adjustment' AND category IN ('shift_cash_in', 'shift_cash_out') AND status <> 'cancelled'
-         ORDER BY created_at DESC
-         LIMIT 1`,
+         ORDER BY created_at`,
         [shift.id],
       ),
       pool.query(
@@ -406,7 +462,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         [shift.id],
       ),
       pool.query(
-        `SELECT p.id, p.name, p.brand, p.unit, COALESCE(b.selling_price,p.selling_price) AS selling_price
+        `SELECT p.id, p.name, p.brand, p.unit, p.gst, COALESCE(b.selling_price,p.selling_price) AS selling_price
          FROM products p LEFT JOIN balances b ON b.product_id=p.id AND b.outlet_id=$2
          WHERE p.settings_id = $1 AND p.kind IN ('lube', 'fmcg')
          ORDER BY p.name`,
@@ -430,7 +486,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         [outletId],
       ),
       pool.query(
-        `SELECT id, name, COALESCE(phone, '') AS phone, COALESCE(vehicle, '') AS vehicle
+        `SELECT id, name, COALESCE(phone, '') AS phone, COALESCE(vehicle, '') AS vehicle, COALESCE(profile, '{}'::jsonb) AS profile
          FROM users
          WHERE outlet_id = $1 AND role = 'credit_customer' AND active = true
          ORDER BY name`,
@@ -542,6 +598,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         qty: num(row.qty) ?? 0,
         unit: row.unit || "",
         rate: num(row.rate) ?? 0,
+        gst: num(row.gst) ?? num(row.product_gst) ?? 0,
         amount: num(row.amount) ?? 0,
         mode: row.mode || "cash",
         vehicle: row.vehicle,
@@ -553,7 +610,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         at: row.created_at,
         mode: row.category === "shift_other" ? "other" : row.mode,
         customer: row.party_name || row.vehicle || row.note,
-        reference: row.reference,
+        batchId: row.reference,
         amount: num(row.net) ?? 0,
       })),
       expenses: expenses.rows.map((row) => ({
@@ -561,6 +618,12 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         category: row.category,
         amount: num(row.amount) ?? 0,
         mode: row.mode || "cash",
+        note: row.note,
+      })),
+      adjustments: adjustment.rows.map((row) => ({
+        id: row.id,
+        type: row.category === "shift_cash_in" ? "in" : "out",
+        amount: num(row.amount) ?? 0,
         note: row.note,
       })),
       adjustment: adjustment.rows[0]
@@ -585,6 +648,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         brand: row.brand,
         unit: row.unit,
         rate: num(row.selling_price) ?? 0,
+        gst: num(row.gst) ?? 0,
       })),
       staff: staff.rows.map((row) => ({
         id: row.id,
@@ -596,6 +660,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         name: row.name,
         phone: row.phone ?? "",
         vehicle: row.vehicle ?? "",
+        vehicles: vehiclesOf(row),
       })),
       tempCreditCustomers: tempPeople.rows.map((row) => ({
         id: row.id,
@@ -604,17 +669,22 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         vehicle: row.vehicle ?? "",
         outstanding: num(row.outstanding) ?? 0,
       })),
-      creditSales: shiftCredits.rows.length
-        ? shiftCredits.rows.map((row) => ({
-            id: row.id,
-            kind: row.category === "shift_temp_credit" ? "temp_credit" : "credit",
-            customerId: row.category === "shift_temp_credit" ? row.reference : row.user_id,
-            name: row.category === "shift_temp_credit" ? row.temp_name || "" : row.user_name || "",
-            phone: row.category === "shift_temp_credit" ? row.temp_phone || "" : row.user_phone || "",
-            vehicle: row.category === "shift_temp_credit" ? row.temp_vehicle || row.vehicle || "" : row.vehicle || "",
-            amount: num(row.net) ?? 0,
-          }))
-        : creditSalesOf(shift.entry?.creditSales),
+      creditSales: (() => {
+        const fromEntry = creditSalesOf(shift.entry?.creditSales);
+        if (fromEntry.length) return fromEntry;
+        return shiftCredits.rows.map((row) => ({
+          id: row.id,
+          kind: row.category === "shift_temp_credit" ? "temp_credit" : "credit",
+          customerId: row.category === "shift_temp_credit" ? row.reference : row.user_id,
+          name: row.category === "shift_temp_credit" ? row.temp_name || "" : row.user_name || "",
+          phone: row.category === "shift_temp_credit" ? row.temp_phone || "" : row.user_phone || "",
+          vehicle: row.category === "shift_temp_credit" ? row.temp_vehicle || row.vehicle || "" : row.vehicle || "",
+          fuel: "",
+          qty: 0,
+          rate: 0,
+          amount: num(row.net) ?? 0,
+        }));
+      })(),
       creditReceipts: creditReceiptsOf(shift.entry?.creditReceipts),
       cashReceipts: savedEntry.cashReceipts ?? [],
     };
@@ -693,7 +763,11 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     const lubes = Array.isArray(req.body?.lubes) ? req.body.lubes : [];
     const payments = Array.isArray(req.body?.payments) ? req.body.payments : [];
     const expenses = Array.isArray(req.body?.expenses) ? req.body.expenses : [];
-    const adjustment = req.body?.adjustment && typeof req.body.adjustment === "object" ? req.body.adjustment : null;
+    const adjustments = Array.isArray(req.body?.adjustments)
+      ? req.body.adjustments
+      : req.body?.adjustment && typeof req.body.adjustment === "object"
+        ? [req.body.adjustment]
+        : [];
     const saleStatus = posted ? "paid" : "draft";
     const docStatus = posted ? "approved" : "draft";
     const expenseStatus = posted ? "approved" : req.user.role === "staff" ? "pending" : "draft";
@@ -710,6 +784,110 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         entry.totals.cash = receiptCashTotal(currentShift.entry, entry.totals.cash, req.body?.entry?.cashReceiptIds, bad, round2);
       }
       if (Array.isArray(currentShift.entry.nozzleIds)) entry.nozzleIds = currentShift.entry.nozzleIds;
+
+      const [prevFuel, prevLubes, prevPayments, prevExpenses, prevAdjust, prevCredits] = await Promise.all([
+        client.query(
+          `SELECT l.equipment_id, l.qty AS sold, l.rate, l.test_qty,
+                  r_open.qty AS opening, r_close.qty AS closing, e.label
+           FROM sale_items l
+           JOIN sales s ON s.id = l.sale_id
+           LEFT JOIN equipment e ON e.id = l.equipment_id
+           LEFT JOIN LATERAL (
+             SELECT qty FROM dip_readings
+             WHERE shift_id = s.shift_id AND equipment_id = l.equipment_id AND kind = 'opening'
+             ORDER BY at DESC LIMIT 1
+           ) r_open ON true
+           LEFT JOIN LATERAL (
+             SELECT qty FROM dip_readings
+             WHERE shift_id = s.shift_id AND equipment_id = l.equipment_id AND kind = 'closing'
+             ORDER BY at DESC LIMIT 1
+           ) r_close ON true
+           WHERE s.shift_id = $1 AND s.category = 'shift_fuel' AND s.status <> 'cancelled'`,
+          [shift.id],
+        ),
+        client.query(
+          `SELECT l.product_id, l.description, l.qty, l.rate, l.gst, s.mode::text AS mode, s.vehicle, s.note, s.doc_no
+           FROM sale_items l
+           JOIN sales s ON s.id = l.sale_id
+           WHERE s.shift_id = $1 AND s.category = 'shift_lube' AND s.status <> 'cancelled'`,
+          [shift.id],
+        ),
+        client.query(
+          `SELECT mode::text AS mode, category, reference, vehicle, note, net, created_at
+           FROM documents
+           WHERE shift_id = $1 AND kind = 'payment' AND category IN ('shift_payment', 'shift_other') AND status <> 'cancelled'`,
+          [shift.id],
+        ),
+        client.query(
+          `SELECT category, amount, mode::text AS mode, note
+           FROM expenses
+           WHERE shift_id = $1 AND kind = 'expense' AND status <> 'cancelled'`,
+          [shift.id],
+        ),
+        client.query(
+          `SELECT category, amount, note
+           FROM documents
+           WHERE shift_id = $1 AND kind = 'adjustment' AND category IN ('shift_cash_in', 'shift_cash_out') AND status <> 'cancelled'
+           ORDER BY created_at`,
+          [shift.id],
+        ),
+        client.query(
+          `SELECT category, user_id, reference, vehicle, note, net
+           FROM sales
+           WHERE shift_id = $1 AND category IN ('shift_credit', 'shift_temp_credit') AND status <> 'cancelled'`,
+          [shift.id],
+        ),
+      ]);
+      const beforePumps = prevFuel.rows.map((row) => ({
+        equipmentId: row.equipment_id,
+        label: row.label,
+        opening: num(row.opening) ?? 0,
+        closing: num(row.closing) ?? 0,
+        test: num(row.test_qty) ?? 0,
+        rate: num(row.rate) ?? 0,
+      }));
+      const beforeLubes = prevLubes.rows.map((row) => ({
+        productId: row.product_id,
+        productName: row.description,
+        qty: num(row.qty) ?? 0,
+        rate: num(row.rate) ?? 0,
+        gst: num(row.gst) ?? 0,
+        mode: row.mode || "cash",
+        vehicle: row.vehicle || "",
+        note: row.note || "",
+        docNo: row.doc_no || "",
+      }));
+      const beforePayments = prevPayments.rows.map((row) => ({
+        mode: row.category === "shift_other" ? "other" : row.mode,
+        amount: num(row.net) ?? 0,
+        batchId: row.reference || "",
+        customer: row.vehicle || row.note || "",
+        at: row.created_at,
+      }));
+      const beforeExpenses = prevExpenses.rows.map((row) => ({
+        category: row.category || "",
+        amount: num(row.amount) ?? 0,
+        mode: row.mode || "cash",
+        note: row.note || "",
+      }));
+      const beforeAdjustments = prevAdjust.rows.map((row) => ({
+        type: row.category === "shift_cash_in" ? "in" : "out",
+        amount: num(row.amount) ?? 0,
+        note: row.note || "",
+      }));
+      const beforeCreditSales = (prevCredits.rows.length
+        ? prevCredits.rows.map((row) => ({
+            kind: row.category === "shift_temp_credit" ? "temp_credit" : "credit",
+            customerId: row.category === "shift_temp_credit" ? row.reference : row.user_id,
+            name: row.note || "",
+            phone: "",
+            vehicle: row.vehicle || "",
+            amount: num(row.net) ?? 0,
+          }))
+        : creditSalesOf(currentShift.entry?.creditSales));
+      const beforeCreditReceipts = creditReceiptsOf(currentShift.entry?.creditReceipts);
+      const beforeEntry = currentShift.entry && typeof currentShift.entry === "object" ? currentShift.entry : {};
+
       const owned = await client.query(
         `SELECT l.id AS sale_item_id, l.qty, l.product_id, l.equipment_id, l.rate, pr.kind
          FROM sale_items l
@@ -750,7 +928,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
 
       const equipment = nozzleIds.length
         ? await client.query(
-            `SELECT e.id, e.product_id, pr.name AS product_name, pr.kind, pr.selling_price
+            `SELECT e.id, e.label, e.product_id, pr.name AS product_name, pr.kind, pr.selling_price
              FROM equipment e
              LEFT JOIN products pr ON pr.id = e.product_id
              WHERE e.outlet_id = $1 AND e.kind = 'nozzle' AND e.id = ANY($2::uuid[])`,
@@ -830,7 +1008,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (!(qty > 0) && !(amount > 0)) continue;
         const product = uuidOrNull(row.productId)
           ? await client.query(
-              `SELECT id, name, kind FROM products WHERE id = $1 AND settings_id = $2`,
+              `SELECT id, name, kind, gst FROM products WHERE id = $1 AND settings_id = $2`,
               [row.productId, outlet.settings_id],
             )
           : { rows: [] };
@@ -838,6 +1016,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (!item || item.kind === "fuel") continue;
         const mode = payMode(row.mode);
         const status = submit && mode === "credit" ? "open" : saleStatus;
+        const gst = row.gst == null || row.gst === "" ? num(item.gst) ?? 0 : Math.max(0, money(row.gst));
         const inserted = await client.query(
           `INSERT INTO sales (
              outlet_id, user_id, shift_id, status, doc_no, doc_date, amount, net, mode, category, vehicle, note, created_by, created_at
@@ -849,9 +1028,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           ],
         );
         const saleItem = await client.query(
-          `INSERT INTO sale_items (sale_id, product_id, description, qty, rate, amount)
-           VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-          [inserted.rows[0].id, item.id, item.name, qty, rate, amount],
+          `INSERT INTO sale_items (sale_id, product_id, description, qty, rate, amount, gst)
+           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
+          [inserted.rows[0].id, item.id, item.name, qty, rate, amount, gst],
         );
         await moveStock(client, outlet.id, item.id, item.kind, -qty, saleItem.rows[0].id);
       }
@@ -862,6 +1041,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const other = String(row.mode ?? "").toLowerCase() === "other";
         const mode = other ? null : payMode(row.mode);
         const customer = clip(row.customer, 120);
+        const batchId = clip(row.batchId ?? row.reference, 80) || null;
         await client.query(
           `INSERT INTO documents (
              outlet_id, user_id, shift_id, kind, status, doc_date, amount, net, mode, category, reference, vehicle, created_by, created_at
@@ -869,7 +1049,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           [
             outlet.id, shift.id, docStatus, docDate, amount, mode,
             other ? "shift_other" : "shift_payment",
-            clip(row.reference, 80) || null,
+            batchId,
             customer || null,
             req.user.id,
             Number.isFinite(Date.parse(row.at)) ? new Date(row.at).toISOString() : new Date().toISOString(),
@@ -893,10 +1073,17 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       }
 
       let cashAdjust = 0;
-      const adjustAmount = round2(money(adjustment?.amount));
-      const adjustType = adjustment?.type === "in" ? "in" : adjustment?.type === "out" ? "out" : "";
-      if (adjustType && adjustAmount > 0) {
-        cashAdjust = adjustType === "in" ? adjustAmount : -adjustAmount;
+      const savedAdjustments = [];
+      for (const row of adjustments) {
+        const adjustAmount = round2(money(row?.amount));
+        const adjustType = row?.type === "in" ? "in" : row?.type === "out" ? "out" : "";
+        if (!adjustType || !(adjustAmount > 0)) continue;
+        cashAdjust = round2(cashAdjust + (adjustType === "in" ? adjustAmount : -adjustAmount));
+        savedAdjustments.push({
+          type: adjustType,
+          amount: adjustAmount,
+          note: clip(row?.note, 200) || "",
+        });
         await client.query(
           `INSERT INTO documents (
              outlet_id, shift_id, kind, status, doc_date, amount, net, mode, category, note, created_by
@@ -904,7 +1091,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           [
             outlet.id, shift.id, docStatus, docDate, adjustAmount,
             adjustType === "in" ? "shift_cash_in" : "shift_cash_out",
-            clip(adjustment.note, 200) || null, req.user.id,
+            clip(row?.note, 200) || null, req.user.id,
           ],
         );
       }
@@ -969,7 +1156,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
               `INSERT INTO sales (
                  outlet_id, shift_id, status, doc_date, amount, net, mode, category, reference, vehicle, note, created_by
                ) VALUES ($1,$2,'open',$3,$4,$4,'temp_credit','shift_temp_credit',$5,$6,$7,$8)`,
-              [outlet.id, shift.id, docDate, row.amount, customerId, row.vehicle || null, row.phone || null, req.user.id],
+              [outlet.id, shift.id, docDate, row.amount, customerId, row.vehicle || null, creditSaleNote(row), req.user.id],
             );
             continue;
           }
@@ -978,7 +1165,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
             `INSERT INTO sales (
                outlet_id, user_id, shift_id, status, doc_date, amount, net, mode, category, vehicle, note, created_by
              ) VALUES ($1,$2,$3,'open',$4,$5,$5,'credit','shift_credit',$6,$7,$8)`,
-            [outlet.id, customerId, shift.id, docDate, row.amount, row.vehicle || null, row.phone || null, req.user.id],
+            [outlet.id, customerId, shift.id, docDate, row.amount, row.vehicle || null, creditSaleNote(row), req.user.id],
           );
         }
       }
@@ -1004,6 +1191,78 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           [shift.id, JSON.stringify(entry), expected],
         );
       }
+
+      const afterPumps = pumps.map((row) => {
+        const id = uuidOrNull(row.equipmentId);
+        const nozzle = id ? nozzleById.get(id) : null;
+        return {
+          equipmentId: id,
+          label: nozzle?.label || nozzle?.product_name || id,
+          opening: money(row.opening),
+          closing: money(row.closing),
+          test: money(row.test),
+          rate: money(row.rate),
+        };
+      }).filter((row) => row.equipmentId);
+      const afterLubes = lubes
+        .map((row) => ({
+          productId: uuidOrNull(row.productId),
+          productName: "",
+          qty: money(row.qty),
+          rate: money(row.rate),
+          gst: row.gst == null || row.gst === "" ? 0 : money(row.gst),
+          mode: payMode(row.mode) || "cash",
+          vehicle: clip(row.vehicle, 80) || "",
+          note: clip(row.note, 200) || "",
+          docNo: clip(row.docNo, 40) || "",
+        }))
+        .filter((row) => row.productId && row.qty > 0);
+      const afterPayments = payments
+        .filter((row) => money(row.amount) > 0)
+        .map((row) => ({
+          mode: String(row.mode ?? "").toLowerCase() === "other" ? "other" : payMode(row.mode),
+          amount: money(row.amount),
+          batchId: clip(row.batchId ?? row.reference, 80) || "",
+          customer: clip(row.customer, 120) || "",
+          at: row.at || "",
+        }));
+      const afterExpenses = expenses
+        .filter((row) => money(row.amount) > 0 && clip(row.category, 80))
+        .map((row) => ({
+          category: clip(row.category, 80),
+          amount: money(row.amount),
+          mode: payMode(row.mode) || "cash",
+          note: clip(row.note, 200) || "",
+        }));
+      const activityEvents = shiftEntryActivityEvents({
+        beforePumps,
+        afterPumps,
+        beforeLubes,
+        afterLubes,
+        beforePayments,
+        afterPayments,
+        beforeExpenses,
+        afterExpenses,
+        beforeCreditSales,
+        afterCreditSales: entry.creditSales,
+        beforeCreditReceipts,
+        afterCreditReceipts: entry.creditReceipts,
+        beforeAdjustments,
+        afterAdjustments: savedAdjustments,
+        beforeEntry,
+        afterEntry: entry,
+      });
+      activityEvents.push({
+        action: "shift",
+        detail: submit ? "Shift submitted" : "Shift entry saved",
+      });
+      await writeShiftEntryActivity(client, {
+        user: req.user,
+        outletId: outlet.id,
+        shiftId: shift.id,
+        events: activityEvents,
+      });
+
       await client.query("COMMIT");
     } catch (error) {
       await client.query("ROLLBACK");
@@ -1011,8 +1270,6 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
     } finally {
       client.release();
     }
-
-    await log(req.user, outlet.id, "shift", submit ? "Shift submitted" : "Shift entry saved", "shifts", shift.id);
     const fresh = await pool.query(`SELECT * FROM shifts WHERE id = $1`, [shift.id]);
     res.json(await bundle(fresh.rows[0], outlet.settings_id));
   }));
