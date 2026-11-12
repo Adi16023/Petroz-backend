@@ -899,7 +899,11 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       Object.prototype.hasOwnProperty.call(body, key),
     );
     if (touchesProfile) {
-      if (!["owner", "super_admin"].includes(req.user.role)) throw bad("You cannot edit staff.", 403);
+      if (row.role === "credit_customer") {
+        if (!["owner", "super_admin", "manager"].includes(req.user.role)) throw bad("You cannot edit this customer.", 403);
+      } else if (!["owner", "super_admin"].includes(req.user.role)) {
+        throw bad("You cannot edit staff.", 403);
+      }
       const name = String(body.name ?? "").trim();
       if (Object.prototype.hasOwnProperty.call(body, "name") && !name) throw bad("Name is required.");
       if (Object.prototype.hasOwnProperty.call(body, "phone")) {
@@ -963,6 +967,49 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
         ],
       );
     }
+
+    if (row.role === "credit_customer") {
+      const creditKeys = ["customerType", "gstin", "creditLimit", "creditPeriodDays", "vehicle", "vehicles"];
+      const touchesCredit = creditKeys.some((key) => Object.prototype.hasOwnProperty.call(body, key));
+      if (touchesCredit) {
+        if (!["owner", "super_admin", "manager"].includes(req.user.role)) throw bad("You cannot edit this customer.", 403);
+        const vehicles = Array.isArray(body.vehicles)
+          ? [...new Set(body.vehicles.map((item) => String(item ?? "").trim()).filter(Boolean))]
+          : null;
+        const profilePatch = vehicles ? { vehicles } : null;
+        const period = Object.prototype.hasOwnProperty.call(body, "creditPeriodDays")
+          ? (body.creditPeriodDays == null || body.creditPeriodDays === ""
+            ? null
+            : Number(String(body.creditPeriodDays).replace(/\D/g, "")) || null)
+          : null;
+        await pool.query(
+          `UPDATE users SET
+             gstin = CASE WHEN $2 THEN $3 ELSE gstin END,
+             customer_type = CASE WHEN $4 THEN $5 ELSE customer_type END,
+             credit_limit = CASE WHEN $6 THEN $7 ELSE credit_limit END,
+             credit_period_days = CASE WHEN $8 THEN $9 ELSE credit_period_days END,
+             vehicle = CASE WHEN $10 THEN $11 ELSE vehicle END,
+             profile = CASE WHEN $12 THEN COALESCE(profile, '{}'::jsonb) || $13::jsonb ELSE profile END
+           WHERE id = $1`,
+          [
+            row.id,
+            Object.prototype.hasOwnProperty.call(body, "gstin"),
+            String(body.gstin ?? "").trim() || null,
+            Object.prototype.hasOwnProperty.call(body, "customerType"),
+            String(body.customerType ?? "").trim() || null,
+            Object.prototype.hasOwnProperty.call(body, "creditLimit"),
+            body.creditLimit == null || body.creditLimit === "" ? null : money(body.creditLimit),
+            Object.prototype.hasOwnProperty.call(body, "creditPeriodDays"),
+            period,
+            Object.prototype.hasOwnProperty.call(body, "vehicle") || vehicles != null,
+            vehicles?.[0] ?? (Object.prototype.hasOwnProperty.call(body, "vehicle") ? String(body.vehicle ?? "").trim() || null : null),
+            Boolean(profilePatch),
+            profilePatch ? JSON.stringify(profilePatch) : null,
+          ],
+        );
+      }
+    }
+
     if (req.body?.profile && typeof req.body.profile === "object" && !Array.isArray(req.body.profile)) {
       if (!["owner", "super_admin", "manager", "attendance"].includes(req.user.role)) throw bad("You cannot edit this profile.", 403);
       await pool.query(
