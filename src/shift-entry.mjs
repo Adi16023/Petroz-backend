@@ -35,6 +35,11 @@ function atOnShift(startsAt, timeText) {
 }
 
 const CASH_NOTES = [10, 20, 50, 100, 200, 500];
+const CASH_COINS = [1, 2, 5, 10];
+
+function coinKey(value) {
+  return value === 10 ? "c10" : String(value);
+}
 
 function cashCountOf(raw) {
   const source = raw?.cashCount && typeof raw.cashCount === "object" ? raw.cashCount : {};
@@ -44,14 +49,29 @@ function cashCountOf(raw) {
     const qty = n == null || n < 0 ? 0 : Math.round(n);
     count[String(note)] = Math.min(qty, 100000);
   }
-  const coins = num(source.coins);
-  count.coins = coins == null || coins < 0 ? 0 : Math.round(coins * 100) / 100;
+  let coinTotal = 0;
+  let hasCoinCounts = false;
+  for (const coin of CASH_COINS) {
+    const key = coinKey(coin);
+    const n = num(source[key]);
+    const qty = n == null || n < 0 ? 0 : Math.round(n);
+    count[key] = Math.min(qty, 100000);
+    if (count[key] > 0) hasCoinCounts = true;
+    coinTotal += coin * count[key];
+  }
+  if (hasCoinCounts) {
+    count.coins = Math.round(coinTotal * 100) / 100;
+  } else {
+    const coins = num(source.coins);
+    count.coins = coins == null || coins < 0 ? 0 : Math.round(coins * 100) / 100;
+  }
   return count;
 }
 
 function receiptCounts(raw, bad, round2) {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw bad("Enter cash denominations.");
-  if (Object.keys(raw).some((key) => ![...CASH_NOTES.map(String), "coins"].includes(key))) {
+  const allowed = new Set([...CASH_NOTES.map(String), ...CASH_COINS.map(coinKey), "coins"]);
+  if (Object.keys(raw).some((key) => !allowed.has(key))) {
     throw bad("Unknown cash denomination.");
   }
   const counts = {};
@@ -62,11 +82,27 @@ function receiptCounts(raw, bad, round2) {
     }
     counts[String(note)] = quantity;
   }
-  const coins = raw.coins ?? 0;
-  if (typeof coins !== "number" || !Number.isFinite(coins) || coins < 0 || coins > 50000000 || Math.abs(round2(coins) - coins) > 0.000001) {
-    throw bad("Enter a valid coin amount with up to two decimal places.");
+  let coinTotal = 0;
+  let hasCoinCounts = false;
+  for (const coin of CASH_COINS) {
+    const key = coinKey(coin);
+    const quantity = raw[key] ?? 0;
+    if (typeof quantity !== "number" || !Number.isSafeInteger(quantity) || quantity < 0 || quantity > 100000) {
+      throw bad("Coin quantities must be whole numbers between 0 and 100000.");
+    }
+    counts[key] = quantity;
+    if (quantity > 0) hasCoinCounts = true;
+    coinTotal += coin * quantity;
   }
-  counts.coins = round2(coins);
+  if (hasCoinCounts || raw.coins == null) {
+    counts.coins = round2(coinTotal);
+  } else {
+    const coins = raw.coins;
+    if (typeof coins !== "number" || !Number.isFinite(coins) || coins < 0 || coins > 50000000 || Math.abs(round2(coins) - coins) > 0.000001) {
+      throw bad("Enter a valid coin amount with up to two decimal places.");
+    }
+    counts.coins = round2(coins);
+  }
   return counts;
 }
 

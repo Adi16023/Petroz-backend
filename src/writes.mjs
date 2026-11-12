@@ -451,9 +451,31 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       counts[String(denomination)] = quantity;
       amount += denomination * quantity;
     }
-    const coins = source.coins == null || source.coins === "" ? 0 : Number(source.coins);
-    if (!Number.isFinite(coins) || coins < 0) throw bad("Enter a valid amount for coins.");
-    counts.coins = round2(coins);
+    const coinDenoms = [
+      { key: "1", value: 1, label: "₹1 coin" },
+      { key: "2", value: 2, label: "₹2 coin" },
+      { key: "5", value: 5, label: "₹5 coin" },
+      { key: "c10", value: 10, label: "₹10 coin" },
+    ];
+    let coinTotal = 0;
+    let hasCoinCounts = false;
+    for (const { key, value, label } of coinDenoms) {
+      const raw = source[key];
+      const quantity = raw == null || raw === "" ? 0 : Number(raw);
+      if (!Number.isInteger(quantity) || quantity < 0 || quantity > 100000) {
+        throw bad(`Enter a valid quantity for ${label}.`);
+      }
+      counts[key] = quantity;
+      if (quantity > 0) hasCoinCounts = true;
+      coinTotal += value * quantity;
+    }
+    if (hasCoinCounts || source.coins == null || source.coins === "") {
+      counts.coins = round2(coinTotal);
+    } else {
+      const coins = Number(source.coins);
+      if (!Number.isFinite(coins) || coins < 0) throw bad("Enter a valid amount for coins.");
+      counts.coins = round2(coins);
+    }
     amount = round2(amount + counts.coins);
     const note = JSON.stringify(counts);
     const client = await pool.connect();
