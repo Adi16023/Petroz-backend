@@ -1040,8 +1040,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       for (const row of lubes) {
         const qty = Math.max(0, money(row.qty));
         const rate = Math.max(0, money(row.rate));
-        const amount = round2(qty * rate);
-        if (!(qty > 0) && !(amount > 0)) continue;
+        if (!(qty > 0) && !(qty * rate > 0)) continue;
         const product = uuidOrNull(row.productId)
           ? await client.query(
               `SELECT id, name, kind, gst FROM products WHERE id = $1 AND settings_id = $2`,
@@ -1053,6 +1052,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const mode = payMode(row.mode);
         const status = submit && mode === "credit" ? "open" : saleStatus;
         const gst = row.gst == null || row.gst === "" ? num(item.gst) ?? 0 : Math.max(0, money(row.gst));
+        const amount = round2(qty * rate * (1 + gst / 100));
+        if (!(amount > 0)) continue;
         const inserted = await client.query(
           `INSERT INTO sales (
              outlet_id, user_id, shift_id, status, doc_no, doc_date, amount, net, mode, category, vehicle, note, created_by, created_at

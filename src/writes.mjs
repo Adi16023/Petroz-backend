@@ -166,6 +166,31 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     return value;
   }
 
+
+  async function rememberPartyVehicle(client, partyId, vehicle) {
+    const name = String(vehicle ?? "").trim().slice(0, 40);
+    if (!partyId || !name) return;
+    const found = await client.query(`SELECT role, vehicle, profile FROM users WHERE id = $1`, [partyId]);
+    const row = found.rows[0];
+    if (!row || row.role !== "credit_customer") return;
+    const profile = row.profile && typeof row.profile === "object" && !Array.isArray(row.profile) ? { ...row.profile } : {};
+    const listed = Array.isArray(profile.vehicles)
+      ? profile.vehicles.map((item) => String(item ?? "").trim()).filter(Boolean)
+      : [];
+    if (row.vehicle && !listed.some((item) => item.toLowerCase() === String(row.vehicle).toLowerCase())) {
+      listed.unshift(String(row.vehicle).trim());
+    }
+    if (!listed.some((item) => item.toLowerCase() === name.toLowerCase())) listed.push(name);
+    profile.vehicles = listed;
+    await client.query(
+      `UPDATE users
+         SET vehicle = COALESCE(NULLIF(vehicle, ''), $2),
+             profile = $3::jsonb
+       WHERE id = $1`,
+      [partyId, name, JSON.stringify(profile)],
+    );
+  }
+
   async function partyId(user, outletId, name, explicitId) {
     if (explicitId) return explicitId;
     const label = String(name ?? "").trim();
@@ -407,6 +432,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           `UPDATE shifts SET expected_cash = expected_cash - $2 WHERE id = $1`,
           [req.body.shiftId, net],
         );
+      }
+      if (kind === "sale" && mode === "credit" && userId && req.body?.vehicle) {
+        await rememberPartyVehicle(client, userId, req.body.vehicle);
       }
       await client.query(
         `INSERT INTO activity (outlet_id, actor_id, action, detail, target_table, target_id)
@@ -976,6 +1004,54 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     res.json({ id: row.id });
   }));
 
+
+
+  app.get("/api/parties/:id/vehicles", wrap(async (req, res) => {
+    const { rows } = await pool.query(
+      `SELECT id, outlet_id, settings_id, role, vehicle, profile
+         FROM users
+        WHERE id = $1 AND ($2::uuid IS NULL OR settings_id = $2)`,
+      [req.params.id, req.user.role === "super_admin" ? null : req.user.settings_id],
+    );
+    const row = rows[0];
+    if (!row) throw bad("Party not found.", 404);
+    if (row.role !== "credit_customer") throw bad("Vehicles belong on credit customers.");
+    if (row.outlet_id) await assertOutlet(pool, req.user, row.outlet_id);
+    const profile = row.profile && typeof row.profile === "object" && !Array.isArray(row.profile) ? row.profile : {};
+    const listed = [];
+    const seen = new Set();
+    function push(value) {
+      const name = String(value ?? "").trim().slice(0, 40);
+      if (!name) return;
+      const key = name.toLowerCase();
+      if (seen.has(key)) return;
+      seen.add(key);
+      listed.push(name);
+    }
+    if (Array.isArray(profile.vehicles)) for (const item of profile.vehicles) push(item);
+    push(row.vehicle);
+    const sales = await pool.query(
+      `SELECT DISTINCT TRIM(vehicle) AS vehicle
+         FROM sales
+        WHERE user_id = $1
+          AND vehicle IS NOT NULL
+          AND TRIM(vehicle) <> ''
+        ORDER BY 1`,
+      [row.id],
+    );
+    for (const item of sales.rows) push(item.vehicle);
+    const docs = await pool.query(
+      `SELECT DISTINCT TRIM(vehicle) AS vehicle
+         FROM documents
+        WHERE user_id = $1
+          AND vehicle IS NOT NULL
+          AND TRIM(vehicle) <> ''
+        ORDER BY 1`,
+      [row.id],
+    ).catch(() => ({ rows: [] }));
+    for (const item of docs.rows) push(item.vehicle);
+    res.json({ id: row.id, vehicles: listed, vehicle: listed[0] ?? row.vehicle ?? "" });
+  }));
 
   app.post("/api/parties/:id/vehicles", wrap(async (req, res) => {
     const { rows } = await pool.query(
