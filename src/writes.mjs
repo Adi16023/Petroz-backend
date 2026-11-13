@@ -1137,12 +1137,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (!name) throw bad("Product name is required.");
     const kind = req.body?.kind === "fmcg" ? "fmcg" : req.body?.kind === "fuel" ? "fuel" : "lube";
     const { rows } = await pool.query(
-      `INSERT INTO products (settings_id, kind, name, brand, code, hsn, unit, gst, purchase_price, selling_price)
-       VALUES ($1, $2::product_kind, $3, $4, $5, $6, $7, $8, $9, $10)
+      `INSERT INTO products (settings_id, kind, name, brand, code, hsn, unit, discount, gst, purchase_price, selling_price)
+       VALUES ($1, $2::product_kind, $3, $4, $5, $6, $7, $8, $9, $10, $11)
        RETURNING id`,
       [
         outlet.settings_id, kind, name, req.body?.brand || null, req.body?.code || null, req.body?.hsn || null,
-        req.body?.unit || null, money(req.body?.gst), money(req.body?.purchasePrice), money(req.body?.sellingPrice),
+        req.body?.unit || null, money(req.body?.discount), money(req.body?.gst), money(req.body?.purchasePrice), money(req.body?.sellingPrice),
       ],
     );
     const id = rows[0].id;
@@ -1238,6 +1238,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     }
     if (Object.prototype.hasOwnProperty.call(body, "hsn")) {
       await pool.query(`UPDATE products SET hsn = $2 WHERE id = $1`, [req.params.id, String(body.hsn ?? "").trim() || null]);
+    }
+    if (Object.prototype.hasOwnProperty.call(body, "discount")) {
+      await pool.query(`UPDATE products SET discount = $2 WHERE id = $1`, [req.params.id, money(body.discount)]);
     }
     if (Object.prototype.hasOwnProperty.call(body, "kind")) {
       const kind = body.kind === "fmcg" ? "fmcg" : "lube";

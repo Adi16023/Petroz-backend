@@ -78,6 +78,7 @@ function lubeFinger(row) {
     row.productId || row.product_id || "",
     round2(row.qty),
     round2(row.rate),
+    round2(row.discount ?? 0),
     round2(row.gst ?? 0),
     text(row.mode),
     text(row.vehicle),
@@ -95,7 +96,7 @@ function describeLube(kind, before, after) {
   if (kind === "deleted") {
     return `Removed lube / product sale: ${name} × ${round2(row.qty)}`;
   }
-  return `Updated lube / product sale: ${name} × ${round2(before.qty)}→${round2(after.qty)} @ ${moneyText(before.rate)}→${moneyText(after.rate)}, GST ${round2(before.gst ?? 0)}%→${round2(after.gst ?? 0)}%`;
+  return `Updated lube / product sale: ${name} × ${round2(before.qty)}→${round2(after.qty)} @ ${moneyText(before.rate)}→${moneyText(after.rate)}, discount ${round2(before.discount ?? 0)}%→${round2(after.discount ?? 0)}%, GST ${round2(before.gst ?? 0)}%→${round2(after.gst ?? 0)}%`;
 }
 
 function paySoft(row) {

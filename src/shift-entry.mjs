@@ -459,8 +459,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       ),
       pool.query(
         `SELECT s.id, s.created_at, s.doc_no, s.mode::text AS mode, s.vehicle, s.note,
-                l.product_id, l.description, l.qty, l.rate, l.amount, l.gst,
-                pr.name AS product_name, pr.brand, pr.unit, pr.gst AS product_gst
+                l.product_id, l.description, l.qty, l.rate, l.amount, l.discount, l.gst,
+                pr.name AS product_name, pr.brand, pr.unit, pr.discount AS product_discount, pr.gst AS product_gst
          FROM sales s
          JOIN sale_items l ON l.sale_id = s.id
          LEFT JOIN products pr ON pr.id = l.product_id
@@ -499,7 +499,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         [shift.id],
       ),
       pool.query(
-        `SELECT p.id, p.name, p.brand, p.unit, p.gst, COALESCE(b.selling_price,p.selling_price) AS selling_price
+        `SELECT p.id, p.name, p.brand, p.unit, p.discount, p.gst, COALESCE(b.selling_price,p.selling_price) AS selling_price
          FROM products p LEFT JOIN balances b ON b.product_id=p.id AND b.outlet_id=$2
          WHERE p.settings_id = $1 AND p.kind IN ('lube', 'fmcg')
          ORDER BY p.name`,
@@ -640,6 +640,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         qty: num(row.qty) ?? 0,
         unit: row.unit || "",
         rate: num(row.rate) ?? 0,
+        discount: num(row.discount) ?? num(row.product_discount) ?? 0,
         gst: num(row.gst) ?? num(row.product_gst) ?? 0,
         amount: num(row.amount) ?? 0,
         mode: row.mode || "cash",
@@ -690,6 +691,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         brand: row.brand,
         unit: row.unit,
         rate: num(row.selling_price) ?? 0,
+        discount: num(row.discount) ?? 0,
         gst: num(row.gst) ?? 0,
       })),
       staff: staff.rows.map((row) => ({
@@ -872,7 +874,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           [shift.id],
         ),
         client.query(
-          `SELECT l.product_id, l.description, l.qty, l.rate, l.gst, s.mode::text AS mode, s.vehicle, s.note, s.doc_no
+          `SELECT l.product_id, l.description, l.qty, l.rate, l.discount, l.gst, s.mode::text AS mode, s.vehicle, s.note, s.doc_no
            FROM sale_items l
            JOIN sales s ON s.id = l.sale_id
            WHERE s.shift_id = $1 AND s.category = 'shift_lube' AND s.status <> 'cancelled'`,
@@ -917,6 +919,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         productName: row.description,
         qty: num(row.qty) ?? 0,
         rate: num(row.rate) ?? 0,
+        discount: num(row.discount) ?? 0,
         gst: num(row.gst) ?? 0,
         mode: row.mode || "cash",
         vehicle: row.vehicle || "",
@@ -1126,7 +1129,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (!(qty > 0) && !(qty * rate > 0)) continue;
         const product = uuidOrNull(row.productId)
           ? await client.query(
-              `SELECT id, name, kind, gst FROM products WHERE id = $1 AND settings_id = $2`,
+              `SELECT id, name, kind, discount, gst FROM products WHERE id = $1 AND settings_id = $2`,
               [row.productId, outlet.settings_id],
             )
           : { rows: [] };
@@ -1134,8 +1137,12 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (!item || item.kind === "fuel") continue;
         const mode = payMode(row.mode);
         const status = submit && mode === "credit" ? "open" : saleStatus;
+        const discount = row.discount == null || row.discount === ""
+          ? Math.max(0, Math.min(100, num(item.discount) ?? 0))
+          : Math.max(0, Math.min(100, money(row.discount)));
         const gst = row.gst == null || row.gst === "" ? num(item.gst) ?? 0 : Math.max(0, money(row.gst));
-        const amount = round2(qty * rate * (1 + gst / 100));
+        const net = round2(qty * rate * (1 - discount / 100));
+        const amount = round2(Math.max(0, net) * (1 + gst / 100));
         if (!(amount > 0)) continue;
         const inserted = await client.query(
           `INSERT INTO sales (
@@ -1148,9 +1155,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           ],
         );
         const saleItem = await client.query(
-          `INSERT INTO sale_items (sale_id, product_id, description, qty, rate, amount, gst)
-           VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING id`,
-          [inserted.rows[0].id, item.id, item.name, qty, rate, amount, gst],
+          `INSERT INTO sale_items (sale_id, product_id, description, qty, rate, amount, discount, gst)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+          [inserted.rows[0].id, item.id, item.name, qty, rate, amount, discount, gst],
         );
         await moveStock(client, outlet.id, item.id, item.kind, -qty, saleItem.rows[0].id);
       }
@@ -1330,6 +1337,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           productName: "",
           qty: money(row.qty),
           rate: money(row.rate),
+          discount: row.discount == null || row.discount === "" ? 0 : money(row.discount),
           gst: row.gst == null || row.gst === "" ? 0 : money(row.gst),
           mode: payMode(row.mode) || "cash",
           vehicle: clip(row.vehicle, 80) || "",

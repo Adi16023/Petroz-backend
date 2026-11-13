@@ -10,6 +10,7 @@ const sql = fs.readFileSync(path.join(dir, "schema.sql"), "utf8");
 const productPrices = fs.readFileSync(path.join(dir, "product-prices.sql"), "utf8");
 const stockBatches = fs.readFileSync(path.join(dir, "stock-batches.sql"), "utf8");
 const offers = fs.readFileSync(path.join(dir, "offers.sql"), "utf8");
+const productDiscount = fs.readFileSync(path.join(dir, "product-discount.sql"), "utf8");
 const stockAudits = fs.readFileSync(path.join(dir, "stock-audits.sql"), "utf8");
 const blog = fs.readFileSync(path.join(dir, "blog.sql"), "utf8");
 
@@ -66,6 +67,7 @@ export async function migrate() {
     await client.query(productPrices);
     await client.query(stockBatches);
     await client.query(offers);
+    await client.query(productDiscount);
     await client.query(stockAudits);
     await client.query(blog);
     await client.query("COMMIT");
