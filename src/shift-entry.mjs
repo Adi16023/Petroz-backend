@@ -4,6 +4,7 @@ import { shiftReadingQty } from "./shift-readings.mjs";
 import { refreshShiftFuelRates } from "./shift-fuel-rates.mjs";
 import { isShiftDsrLocked } from "./shift-dsr-lock.mjs";
 import { shiftEntryActivityEvents, writeShiftEntryActivity } from "./shift-entry-activity.mjs";
+import { discountForSale, offerAppliesToFuel, offerIsActive } from "./offers.mjs";
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -612,6 +613,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const openingReading = savedOpeningNum ?? opening.get(row.id) ?? baseline;
         const closingQty = closing.get(row.id) ?? openingReading;
         const sold = round2(closingQty - openingReading);
+        const pumpOffer = savedEntry.pumpOffers && typeof savedEntry.pumpOffers === "object"
+          ? savedEntry.pumpOffers[row.id]
+          : null;
         return {
           id: row.id,
           label: row.label,
@@ -622,6 +626,8 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
           qty: sold ?? 0,
           test: num(line?.test_qty) ?? 0,
           rate: shift.status === "closed" ? ownRate ?? 0 : catalog,
+          offerId: pumpOffer?.offerId || null,
+          discount: num(pumpOffer?.discount) ?? 0,
           recent: recentByNozzle.get(row.id) ?? [],
         };
       }),
@@ -723,6 +729,30 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       })(),
       creditReceipts: creditReceiptsOf(shift.entry?.creditReceipts),
       cashReceipts: savedEntry.cashReceipts ?? [],
+      offers: (await pool.query(
+        `SELECT id, name, type, applicable, discount, value, minimum, maximum, benefit,
+                start_date::text AS start, end_date::text AS end, audience, enabled, usage, given
+         FROM offers
+         WHERE outlet_id = $1
+         ORDER BY created_at, id`,
+        [outletId],
+      )).rows.map((row) => ({
+        id: row.id,
+        name: row.name,
+        type: row.type,
+        applicable: row.applicable,
+        discount: row.discount,
+        value: Number(row.value),
+        minimum: Number(row.minimum),
+        maximum: Number(row.maximum),
+        benefit: row.benefit,
+        start: row.start,
+        end: row.end,
+        audience: row.audience,
+        enabled: row.enabled,
+        usage: row.usage,
+        given: Number(row.given),
+      })),
     };
   }
 
@@ -983,6 +1013,36 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         for (const nozzle of equipment.rows) nozzle.selling_price = priceById.get(nozzle.product_id);
       }
 
+      const previousOffers = currentShift.entry?.pumpOffers && typeof currentShift.entry.pumpOffers === "object"
+        ? currentShift.entry.pumpOffers
+        : {};
+      for (const prior of Object.values(previousOffers)) {
+        const priorId = uuidOrNull(prior?.offerId);
+        const priorDiscount = Math.max(0, num(prior?.discount) ?? 0);
+        if (!priorId || !(priorDiscount > 0)) continue;
+        await client.query(
+          `UPDATE offers
+           SET usage = GREATEST(0, usage - 1),
+               given = GREATEST(0, given - $3),
+               updated_at = now()
+           WHERE id = $1 AND outlet_id = $2`,
+          [priorId, outlet.id, priorDiscount],
+        );
+      }
+
+      const offerIds = [...new Set(pumps.map((row) => uuidOrNull(row.offerId)).filter(Boolean))];
+      const offerRows = offerIds.length
+        ? await client.query(
+            `SELECT id, name, type, applicable, discount, value, minimum, maximum, enabled,
+                    start_date::text AS start, end_date::text AS end
+             FROM offers WHERE outlet_id = $1 AND id = ANY($2::uuid[])`,
+            [outlet.id, offerIds],
+          )
+        : { rows: [] };
+      const offerById = new Map(offerRows.rows.map((row) => [row.id, row]));
+      const pumpOffers = {};
+      const day = docDate;
+
       for (const row of pumps) {
         const id = uuidOrNull(row.equipmentId);
         const nozzle = id ? nozzleById.get(id) : null;
@@ -1014,7 +1074,29 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (rate == null || rate <= 0) throw bad("Set a valid current fuel rate before saving this shift.");
         entry.fuelRates[nozzle.id] = rate;
         const netQty = Math.max(0, sold - test);
-        const amount = round2(netQty * rate);
+        const gross = round2(netQty * rate);
+        let discount = 0;
+        const selectedOfferId = uuidOrNull(row.offerId);
+        if (selectedOfferId && gross > 0) {
+          const offer = offerById.get(selectedOfferId);
+          if (!offer) throw bad("Selected offer was not found for this outlet.");
+          if (!offerIsActive(offer, day)) throw bad(`Offer "${offer.name || "selected"}" is not active for this shift day.`);
+          if (!offerAppliesToFuel(offer, nozzle.product_name || "")) {
+            throw bad(`Offer does not apply to ${nozzle.product_name || "this fuel"}.`);
+          }
+          discount = discountForSale(offer, netQty, gross, round2);
+          if (discount > 0) {
+            pumpOffers[nozzle.id] = { offerId: selectedOfferId, discount };
+            await client.query(
+              `UPDATE offers SET usage = usage + 1, given = given + $3, updated_at = now()
+               WHERE id = $1 AND outlet_id = $2`,
+              [selectedOfferId, outlet.id, discount],
+            );
+          } else {
+            pumpOffers[nozzle.id] = { offerId: selectedOfferId, discount: 0 };
+          }
+        }
+        const amount = round2(Math.max(0, gross - discount));
         await client.query(
           `INSERT INTO dip_readings (shift_id, equipment_id, user_id, kind, qty)
            VALUES ($1, $2, $3, 'opening'::reading_kind, $4), ($1, $2, $3, 'closing'::reading_kind, $5)`,
@@ -1036,6 +1118,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         );
         if (nozzle.kind === "fuel") await moveStock(client, outlet.id, nozzle.product_id, "fuel", -netQty);
       }
+      entry.pumpOffers = pumpOffers;
 
       for (const row of lubes) {
         const qty = Math.max(0, money(row.qty));

@@ -92,11 +92,14 @@ test("offers migration and routes persist CRUD, preserve counters and enforce ac
     assert.equal((await fetch(`${url}?outletId=${otherDealerOutlet}`)).status, 404);
     assert.equal((await fetch(`${url}`)).status, 400);
     assert.equal((await fetch(`${url}?outletId=bad`)).status, 400);
-    for (const role of ["manager", "staff", "auditor", "credit_customer", "attendance"]) {
-      assert.equal((await fetch(`${url}?outletId=${outlet}`, { headers: { "x-role": role } })).status, 403);
+    for (const role of ["manager", "staff", "auditor"]) {
+      assert.equal((await fetch(`${url}?outletId=${outlet}`, { headers: { "x-role": role } })).status, 200);
       assert.equal((await fetch(url, { ...write("POST", offer), headers: { "Content-Type": "application/json", "x-role": role } })).status, 403);
       assert.equal((await fetch(`${url}/${id}`, { ...write("PATCH", offer), headers: { "Content-Type": "application/json", "x-role": role } })).status, 403);
       assert.equal((await fetch(`${url}/${id}?outletId=${outlet}`, { method: "DELETE", headers: { "x-role": role } })).status, 403);
+    }
+    for (const role of ["credit_customer", "attendance"]) {
+      assert.equal((await fetch(`${url}?outletId=${outlet}`, { headers: { "x-role": role } })).status, 403);
     }
     assert.equal((await fetch(`${url}/${id}`, write("PATCH", { ...offer, outletId: otherOutlet }))).status, 404);
     assert.equal((await fetch(`${url}/${id}`, write("PATCH", { ...offer, outletId: otherDealerOutlet }))).status, 404);

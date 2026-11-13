@@ -2,6 +2,40 @@ const TYPES = ["fuel", "product", "service", "combo"];
 const DISCOUNTS = ["litre", "fixed", "percent"];
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 
+export function offerAppliesToFuel(offer, fuel) {
+  if (!["fuel", "product"].includes(offer?.type)) return false;
+  const applicable = String(offer.applicable ?? "").trim();
+  if (!applicable) return false;
+  if (applicable === "All products / fuel") return true;
+  const needle = String(fuel ?? "").trim().toLowerCase();
+  return applicable.split(",").some((part) => part.trim().toLowerCase() === needle);
+}
+
+export function offerIsActive(offer, day) {
+  if (!offer?.enabled) return false;
+  const start = String(offer.start ?? offer.start_date ?? "");
+  const end = String(offer.end ?? offer.end_date ?? "");
+  if (!day || !start || !end || start > day || end < day) return false;
+  return true;
+}
+
+export function discountForSale(offer, qty, gross, round2) {
+  const litres = Math.max(0, Number(qty) || 0);
+  const amount = Math.max(0, Number(gross) || 0);
+  if (!(litres > 0) && !(amount > 0)) return 0;
+  const minimum = Number(offer.minimum) || 0;
+  if (offer.type === "fuel" && minimum > 0 && litres < minimum) return 0;
+  if (offer.type === "product" && minimum > 0 && amount < minimum) return 0;
+  let waived = 0;
+  const value = Number(offer.value) || 0;
+  if (offer.discount === "litre") waived = round2(value * litres);
+  else if (offer.discount === "percent") waived = round2(amount * (value / 100));
+  else waived = round2(value);
+  const maximum = Number(offer.maximum) || 0;
+  if (maximum > 0) waived = Math.min(waived, maximum);
+  return Math.min(waived, amount);
+}
+
 export function validateOffer(body, bad) {
   if (!body || !TYPES.includes(body.type)) throw bad("Choose a valid offer type.");
   if (!DISCOUNTS.includes(body.discount)) throw bad("Choose a valid discount type.");
@@ -48,9 +82,12 @@ function dto(row) {
 
 const returning = "*, start_date::text AS start, end_date::text AS end";
 
+const DESK_ROLES = new Set(["owner", "super_admin", "manager", "staff", "auditor", "accounts_auditor"]);
+
 export function registerOffers(app, { pool, wrap, bad, assertOutlet }) {
-  async function scope(req, outletId) {
-    if (!["owner", "super_admin"].includes(req.user.role)) throw bad("Only owners can manage offers.", 403);
+  async function scope(req, outletId, { manage = false } = {}) {
+    if (manage && !["owner", "super_admin"].includes(req.user.role)) throw bad("Only owners can manage offers.", 403);
+    if (!manage && !DESK_ROLES.has(req.user.role)) throw bad("Offers are only available on the desk.", 403);
     if (typeof outletId !== "string" || !UUID.test(outletId)) throw bad("A valid outletId is required.");
     return assertOutlet(pool, req.user, outletId);
   }
@@ -62,7 +99,7 @@ export function registerOffers(app, { pool, wrap, bad, assertOutlet }) {
   }));
   app.post("/api/offers", wrap(async (req, res) => {
     res.set("Cache-Control", "no-store");
-    const outlet = await scope(req, req.body?.outletId);
+    const outlet = await scope(req, req.body?.outletId, { manage: true });
     const data = validateOffer(req.body, bad);
     const { rows } = await pool.query(
       `INSERT INTO offers (outlet_id, name, description, type, applicable, discount, value, minimum, maximum, benefit, start_date, end_date, audience, enabled)
@@ -73,7 +110,7 @@ export function registerOffers(app, { pool, wrap, bad, assertOutlet }) {
   }));
   app.patch("/api/offers/:id", wrap(async (req, res) => {
     res.set("Cache-Control", "no-store");
-    const outlet = await scope(req, req.body?.outletId);
+    const outlet = await scope(req, req.body?.outletId, { manage: true });
     if (!UUID.test(req.params.id)) throw bad("Invalid offer ID.");
     const data = validateOffer(req.body, bad);
     const { rows } = await pool.query(
@@ -86,7 +123,7 @@ export function registerOffers(app, { pool, wrap, bad, assertOutlet }) {
     res.json(dto(rows[0]));
   }));
   app.delete("/api/offers/:id", wrap(async (req, res) => {
-    const outlet = await scope(req, req.query.outletId);
+    const outlet = await scope(req, req.query.outletId, { manage: true });
     if (!UUID.test(req.params.id)) throw bad("Invalid offer ID.");
     const { rows } = await pool.query("DELETE FROM offers WHERE id=$1 AND outlet_id=$2 RETURNING id", [req.params.id, outlet.id]);
     if (!rows.length) throw bad("Offer not found.", 404);
