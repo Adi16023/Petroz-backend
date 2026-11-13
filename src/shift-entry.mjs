@@ -43,63 +43,11 @@ function coinKey(value) {
 }
 
 /** Same shortage/excess as Shift Entry review: sales − payments − expenses − cash adjustment. */
-export function entryShortage(sales, totals, expenseTotal, cashAdjustment, round2) {
+function entryShortage(sales, totals, expenseTotal, cashAdjustment, round2) {
   const received = totals && typeof totals === "object"
     ? round2(Object.values(totals).reduce((sum, amount) => sum + (Number(amount) || 0), 0))
     : 0;
   return round2((Number(sales) || 0) - received - (Number(expenseTotal) || 0) - (Number(cashAdjustment) || 0));
-}
-
-/** Fill entry.shortage on shift DTOs when a save has not stored it yet. */
-export async function withShiftShortages(pool, shifts, round2) {
-  const rows = Array.isArray(shifts) ? shifts : [];
-  const missing = rows.filter((shift) => {
-    const entry = shift.entry && typeof shift.entry === "object" ? shift.entry : {};
-    return entry.shortage == null || entry.shortage === "";
-  });
-  if (!missing.length) return rows;
-  const ids = missing.map((shift) => shift.id);
-  const [sales, expenses] = await Promise.all([
-    pool.query(
-      `SELECT shift_id, COALESCE(SUM(net), 0) AS total
-       FROM sales
-       WHERE shift_id = ANY($1::uuid[])
-         AND category IN ('shift_fuel', 'shift_lube')
-         AND status <> 'cancelled'
-       GROUP BY shift_id`,
-      [ids],
-    ),
-    pool.query(
-      `SELECT shift_id, COALESCE(SUM(amount), 0) AS total
-       FROM expenses
-       WHERE shift_id = ANY($1::uuid[])
-         AND kind = 'expense'
-         AND COALESCE(status, '') <> 'rejected'
-       GROUP BY shift_id`,
-      [ids],
-    ),
-  ]);
-  const salesBy = new Map(sales.rows.map((row) => [row.shift_id, Number(row.total) || 0]));
-  const expenseBy = new Map(expenses.rows.map((row) => [row.shift_id, Number(row.total) || 0]));
-  return rows.map((shift) => {
-    const entry = shift.entry && typeof shift.entry === "object" ? { ...shift.entry } : {};
-    if (entry.shortage != null && entry.shortage !== "") return { ...shift, entry };
-    const salesTotal = salesBy.get(shift.id) ?? 0;
-    const expenseTotal = expenseBy.get(shift.id) ?? 0;
-    const adjust = Number(entry.cashAdjustment) || 0;
-    const totals = entry.totals;
-    const hasPayments = totals && typeof totals === "object";
-    if (!salesTotal && !expenseTotal && !hasPayments && !adjust) {
-      return { ...shift, entry: { ...entry, shortage: null } };
-    }
-    return {
-      ...shift,
-      entry: {
-        ...entry,
-        shortage: entryShortage(salesTotal, totals, expenseTotal, adjust, round2),
-      },
-    };
-  });
 }
 
 function cashCountOf(raw) {

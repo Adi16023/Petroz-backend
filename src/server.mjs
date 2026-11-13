@@ -7,7 +7,7 @@ import { createPool } from "../db/pool.mjs";
 import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./auth.mjs";
 import { ensureDemo } from "./demo.mjs";
 import { ensureAttendanceUser, ensureSeed, ensureSuperAdmin } from "./seed.mjs";
-import { promoteDueShifts, withShiftShortages } from "./shift-entry.mjs";
+import { promoteDueShifts } from "./shift-entry.mjs";
 import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
 import { registerPublicBills } from "./public-bills.mjs";
@@ -50,10 +50,6 @@ const PARTY_ROLES = [
 function num(value) {
   if (value == null) return null;
   return Number(value);
-}
-
-function round2(value) {
-  return Math.round((Number(value) || 0) * 100) / 100;
 }
 
 function inr(value) {
@@ -1272,8 +1268,7 @@ app.get("/api/shifts", wrap(async (req, res) => {
      ORDER BY starts_at DESC`,
     [outlet.id, status || null],
   );
-  const shifts = await withShiftShortages(pool, rows.map(shiftDto), round2);
-  res.json(shifts);
+  res.json(rows.map(shiftDto));
 }));
 
 app.get("/api/shifts/:id", wrap(async (req, res) => {
