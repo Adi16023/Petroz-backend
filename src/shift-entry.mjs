@@ -42,6 +42,14 @@ function coinKey(value) {
   return value === 10 ? "c10" : String(value);
 }
 
+/** Same shortage/excess as Shift Entry review: sales − payments − expenses − cash adjustment. */
+function entryShortage(sales, totals, expenseTotal, cashAdjustment, round2) {
+  const received = totals && typeof totals === "object"
+    ? round2(Object.values(totals).reduce((sum, amount) => sum + (Number(amount) || 0), 0))
+    : 0;
+  return round2((Number(sales) || 0) - received - (Number(expenseTotal) || 0) - (Number(cashAdjustment) || 0));
+}
+
 function cashCountOf(raw) {
   const source = raw?.cashCount && typeof raw.cashCount === "object" ? raw.cashCount : {};
   const count = {};
@@ -794,6 +802,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         if (declaredCash != null) declaredCash = round2(declaredCash + delta);
         entry.totals = { ...entry.totals, cash: cashTotal };
         entry.cashReceipts = [...receipts, receipt];
+        if (entry.shortage != null && Number.isFinite(Number(entry.shortage))) {
+          entry.shortage = round2(Number(entry.shortage) - delta);
+        }
         await client.query(
           `UPDATE shifts SET entry = $2::jsonb, expected_cash = $3, declared_cash = $4 WHERE id = $1`,
           [shift.id, JSON.stringify(entry), expectedCash, declaredCash],
@@ -1016,6 +1027,9 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         for (const nozzle of equipment.rows) nozzle.selling_price = priceById.get(nozzle.product_id);
       }
 
+      let fuelSales = 0;
+      let lubeSales = 0;
+      let expenseTotal = 0;
       const previousOffers = currentShift.entry?.pumpOffers && typeof currentShift.entry.pumpOffers === "object"
         ? currentShift.entry.pumpOffers
         : {};
@@ -1107,6 +1121,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         );
         await client.query(`UPDATE equipment SET meter = $2 WHERE id = $1`, [nozzle.id, closing]);
         if (!(sold > 0) && !(amount > 0)) continue;
+        fuelSales = round2(fuelSales + amount);
         const inserted = await client.query(
           `INSERT INTO sales (
              outlet_id, user_id, shift_id, status, doc_date, amount, net, category, created_by
@@ -1144,6 +1159,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const net = round2(qty * rate * (1 - discount / 100));
         const amount = round2(Math.max(0, net) * (1 + gst / 100));
         if (!(amount > 0)) continue;
+        lubeSales = round2(lubeSales + amount);
         const inserted = await client.query(
           `INSERT INTO sales (
              outlet_id, user_id, shift_id, status, doc_no, doc_date, amount, net, mode, category, vehicle, note, created_by, created_at
@@ -1190,6 +1206,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
         const category = clip(row.category, 80);
         if (!(amount > 0) || !category) continue;
         const mode = payMode(row.mode) || "cash";
+        expenseTotal = round2(expenseTotal + amount);
         if (mode === "cash") cashExpenses = round2(cashExpenses + amount);
         await client.query(
           `INSERT INTO expenses (
@@ -1300,6 +1317,7 @@ export function registerShiftEntry(app, { pool, wrap, bad, assertOutlet, log, mo
       entry.cashAdjustment = cashAdjust;
       const creditReceived = round2(entry.creditReceipts.reduce((sum, row) => sum + (row.amount || 0), 0));
       entry.creditReceived = creditReceived;
+      entry.shortage = entryShortage(round2(fuelSales + lubeSales), entry.totals, expenseTotal, cashAdjust, round2);
       const expected = round2((entry.totals.cash || 0) - cashExpenses + cashAdjust + creditReceived);
       if (posted) {
         if (currentShift.status !== "closed") {
