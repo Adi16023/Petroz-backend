@@ -13,6 +13,7 @@ import { registerWrites } from "./writes.mjs";
 import { registerPublicBills } from "./public-bills.mjs";
 import { registerContacts } from "./contacts.mjs";
 import { registerOffers } from "./offers.mjs";
+import { registerBlog } from "./blog.mjs";
 import { registerStockAudits } from "./stock-audits.mjs";
 import { withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
@@ -1897,6 +1898,7 @@ registerContacts(app, { pool, wrap, bad, assertOutlet });
 registerOffers(app, { pool, wrap, bad, assertOutlet });
 registerStockAudits(app, { pool, wrap, bad, assertOutlet });
 registerWrites(app, { pool, wrap, bad, assertOutlet });
+registerBlog(app, { pool, wrap, bad, requireSuper });
 
 function ticketDto(row) {
   return {

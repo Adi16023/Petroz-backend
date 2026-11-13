@@ -11,6 +11,7 @@ const productPrices = fs.readFileSync(path.join(dir, "product-prices.sql"), "utf
 const stockBatches = fs.readFileSync(path.join(dir, "stock-batches.sql"), "utf8");
 const offers = fs.readFileSync(path.join(dir, "offers.sql"), "utf8");
 const stockAudits = fs.readFileSync(path.join(dir, "stock-audits.sql"), "utf8");
+const blog = fs.readFileSync(path.join(dir, "blog.sql"), "utf8");
 
 function directUrl(url) {
   if (!url) throw new Error("DATABASE_URL is not set.");
@@ -66,6 +67,7 @@ export async function migrate() {
     await client.query(stockBatches);
     await client.query(offers);
     await client.query(stockAudits);
+    await client.query(blog);
     await client.query("COMMIT");
   } catch (error) {
     await client.query("ROLLBACK");
