@@ -1957,8 +1957,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (!showBreakup) return lineSum;
     if (bill.pricesIncludeGst) return lineSum;
     const cgst = round2(lineSum * 0.09);
-    const sgst = round2(lineSum * 0.09);
-    return round2(lineSum + cgst + sgst);
+    return round2(lineSum + cgst);
   }
 
   function outletBillAddress(outlet) {
