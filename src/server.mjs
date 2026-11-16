@@ -14,6 +14,7 @@ import { registerPublicBills } from "./public-bills.mjs";
 import { registerContacts } from "./contacts.mjs";
 import { registerOffers } from "./offers.mjs";
 import { registerBlog, registerPublicBlog } from "./blog.mjs";
+import { registerPublicVideoTutorials, registerVideoTutorials } from "./video-tutorials.mjs";
 import { registerStockAudits } from "./stock-audits.mjs";
 import { withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
@@ -202,6 +203,7 @@ app.post("/api/login", wrap(async (req, res) => {
 
 registerPublicBills(app, { pool, wrap, bad });
 registerPublicBlog(app, { pool, wrap, bad });
+registerPublicVideoTutorials(app, { pool, wrap, bad });
 app.use("/api", auth);
 
 app.get("/api/me", wrap(async (req, res) => {
@@ -1907,6 +1909,7 @@ registerOffers(app, { pool, wrap, bad, assertOutlet });
 registerStockAudits(app, { pool, wrap, bad, assertOutlet });
 registerWrites(app, { pool, wrap, bad, assertOutlet });
 registerBlog(app, { pool, wrap, bad, requireSuper });
+registerVideoTutorials(app, { pool, wrap, bad, requireSuper });
 
 function ticketDto(row) {
   return {
