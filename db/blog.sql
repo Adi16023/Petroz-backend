@@ -24,3 +24,22 @@ CREATE INDEX IF NOT EXISTS blog_posts_updated_idx
 
 ALTER TABLE blog_posts
   ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}'::text[];
+
+ALTER TABLE blog_posts
+  ADD COLUMN IF NOT EXISTS post_type text NOT NULL DEFAULT 'blog';
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'blog_posts_post_type_check'
+  ) THEN
+    ALTER TABLE blog_posts
+      ADD CONSTRAINT blog_posts_post_type_check
+      CHECK (post_type IN ('blog', 'article'));
+  END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS blog_posts_post_type_status_idx
+  ON blog_posts (post_type, status, published_at DESC NULLS LAST);

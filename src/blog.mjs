@@ -4,6 +4,7 @@ import { signedUrl } from "./files.mjs";
 
 const UUID = /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i;
 const STATUSES = ["draft", "published"];
+const POST_TYPES = ["blog", "article"];
 const bucket = process.env.S3_BUCKET || process.env.AWS_S3_BUCKET || "pettroz";
 
 function storage() {
@@ -76,6 +77,7 @@ function dto(row, { publicView = false } = {}) {
     excerpt: row.excerpt || "",
     tags: Array.isArray(row.tags) ? row.tags : [],
     category: row.category || "",
+    type: POST_TYPES.includes(row.post_type) ? row.post_type : "blog",
     coverFileId: row.cover_file_id || null,
     coverUrl: row.cover_file_id ? mediaPublicPath(row.cover_file_id) : null,
     bodyHtml: row.body_html || "",
@@ -105,6 +107,11 @@ function validatePost(body, bad, { partial = false } = {}) {
   }
   if (!partial || body.category !== undefined) {
     data.category = String(body.category ?? "").trim().slice(0, 80);
+  }
+  if (!partial || body.type !== undefined) {
+    const nextType = String(body.type ?? "blog").trim().toLowerCase();
+    if (!POST_TYPES.includes(nextType)) throw bad("Type must be blog or article.");
+    data.type = nextType;
   }
   if (!partial || body.slug !== undefined) {
     const raw = body.slug == null || body.slug === "" ? data.title : body.slug;
@@ -146,13 +153,17 @@ export function registerPublicBlog(app, { pool, wrap, bad }) {
     res.redirect(302, url);
   }));
 
-  app.get("/api/public/blog", wrap(async (_req, res) => {
+  app.get("/api/public/blog", wrap(async (req, res) => {
     res.set("Cache-Control", "public, max-age=60, stale-while-revalidate=300");
-    const { rows } = await pool.query(
-      `SELECT * FROM blog_posts
-       WHERE status = 'published'
-       ORDER BY published_at DESC NULLS LAST, updated_at DESC`,
-    );
+    const type = String(req.query.type ?? "").trim().toLowerCase();
+    const params = [];
+    let sql = `SELECT * FROM blog_posts WHERE status = 'published'`;
+    if (POST_TYPES.includes(type)) {
+      params.push(type);
+      sql += ` AND post_type = $${params.length}`;
+    }
+    sql += ` ORDER BY published_at DESC NULLS LAST, updated_at DESC`;
+    const { rows } = await pool.query(sql, params);
     res.json(rows.map((row) => dto(row, { publicView: true })));
   }));
 
@@ -197,13 +208,14 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
     data.excerpt = data.excerpt ?? "";
     data.tags = data.tags ?? [];
     data.category = data.category ?? "";
+    data.type = data.type ?? "blog";
     data.coverFileId = data.coverFileId ?? null;
     data.slug = await uniqueSlug(pool, data.slug || data.title);
     const publishedAt = data.status === "published" ? new Date().toISOString() : null;
     const { rows } = await pool.query(
       `INSERT INTO blog_posts
-         (slug, title, subtitle, excerpt, tags, category, cover_file_id, body_html, body_json, status, published_at, author_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
+         (slug, title, subtitle, excerpt, tags, category, post_type, cover_file_id, body_html, body_json, status, published_at, author_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
        RETURNING *`,
       [
         data.slug,
@@ -212,6 +224,7 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
         data.excerpt,
         data.tags,
         data.category,
+        data.type,
         data.coverFileId,
         data.bodyHtml,
         JSON.stringify(data.bodyJson),
@@ -245,11 +258,12 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
          excerpt = COALESCE($5, excerpt),
          tags = CASE WHEN $6::boolean THEN $7::text[] ELSE tags END,
          category = COALESCE($8, category),
-         cover_file_id = CASE WHEN $9::boolean THEN $10::uuid ELSE cover_file_id END,
-         body_html = COALESCE($11, body_html),
-         body_json = COALESCE($12::jsonb, body_json),
-         status = $13,
-         published_at = $14,
+         post_type = COALESCE($9, post_type),
+         cover_file_id = CASE WHEN $10::boolean THEN $11::uuid ELSE cover_file_id END,
+         body_html = COALESCE($12, body_html),
+         body_json = COALESCE($13::jsonb, body_json),
+         status = $14,
+         published_at = $15,
          updated_at = now()
        WHERE id = $1
        RETURNING *`,
@@ -262,6 +276,7 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
         data.tags !== undefined,
         data.tags ?? [],
         data.category ?? null,
+        data.type ?? null,
         data.coverFileId !== undefined,
         data.coverFileId ?? null,
         data.bodyHtml ?? null,
