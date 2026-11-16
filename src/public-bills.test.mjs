@@ -16,7 +16,7 @@ test("public bill links persist, expose only bill content, and stop working afte
   try {
     await db.exec(`
       CREATE TABLE settings (id uuid PRIMARY KEY, company_image text, banner_image text);
-      CREATE TABLE outlets (id uuid PRIMARY KEY, settings_id uuid, name text, code text, address text, phone text, gstin text, brand text, next_bill_no int, bill jsonb NOT NULL DEFAULT '{}'::jsonb);
+      CREATE TABLE outlets (id uuid PRIMARY KEY, settings_id uuid, name text, code text, address text, city text, state text, pincode text, phone text, gstin text, brand text, next_bill_no int, bill jsonb NOT NULL DEFAULT '{}'::jsonb);
       CREATE TABLE billing (
         id uuid PRIMARY KEY DEFAULT gen_random_uuid(), settings_id uuid, outlet_id uuid, bill_no text,
         billed_at timestamptz, customer_name text, customer_gstin text, vehicle_no text, mobile text, payment_mode text,
@@ -25,8 +25,8 @@ test("public bill links persist, expose only bill content, and stop working afte
       CREATE TABLE payment_methods (outlet_id uuid, code text, name text, active boolean);
       CREATE TABLE activity (outlet_id uuid, actor_id uuid, action text, detail text, target_table text, target_id uuid);
       INSERT INTO settings VALUES ('${settings}', null, null);
-      INSERT INTO outlets VALUES ('${outletId}', '${settings}', 'Test Station', 'OUT', 'Station Road', '1234567890', 'GST123', 'jio-bp', 1, '{"showGstBreakup":false}'::jsonb);
-      INSERT INTO outlets VALUES ('${otherOutlet}', '${settings}', 'Other Station', 'OTHER', '', '', '', null, 1, '{}'::jsonb);
+      INSERT INTO outlets VALUES ('${outletId}', '${settings}', 'Test Station', 'OUT', 'Station Road', 'Thanjavur', 'Tamil Nadu', '613001', '1234567890', 'GST123', 'jio-bp', 1, '{"showGstBreakup":false}'::jsonb);
+      INSERT INTO outlets VALUES ('${otherOutlet}', '${settings}', 'Other Station', 'OTHER', '', '', '', '', '', '', null, 1, '{}'::jsonb);
       INSERT INTO billing (settings_id,outlet_id,bill_no,billed_at,total) VALUES ('${settings}','${outletId}','OUT-00001',now(),100);
     `);
     const schema = readFileSync(new URL("../db/schema.sql", import.meta.url), "utf8");

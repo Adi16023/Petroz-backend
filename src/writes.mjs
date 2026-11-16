@@ -1961,6 +1961,16 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     return round2(lineSum + cgst + sgst);
   }
 
+  function outletBillAddress(outlet) {
+    const line = String(outlet?.address ?? "").trim();
+    const place = [outlet?.city, outlet?.state].map((part) => String(part ?? "").trim()).filter(Boolean).join(", ");
+    const pin = String(outlet?.pincode ?? "").trim();
+    const tail = [place, pin].filter(Boolean).join(" - ");
+    if (!tail) return line;
+    if (!line) return tail;
+    return `${line}, ${tail}`;
+  }
+
   async function nextBillNo(outlet) {
     const { rows } = await pool.query(
       `SELECT COALESCE(MAX(NULLIF(split_part(bill_no, '-', 2), '')::int), 0) + 1 AS n
@@ -1984,7 +1994,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const next = await nextBillNo(outlet);
     res.json({
       stationName: outlet.name,
-      address: outlet.address || "",
+      address: outletBillAddress(outlet),
       phone: outlet.phone || "",
       gstin: outlet.gstin || "",
       brand: outlet.brand || "",
