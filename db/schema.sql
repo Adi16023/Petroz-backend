@@ -637,21 +637,42 @@ CREATE INDEX IF NOT EXISTS billing_outlet_idx ON billing (outlet_id, billed_at D
 ALTER TABLE billing ADD COLUMN IF NOT EXISTS public_token text NOT NULL DEFAULT replace(gen_random_uuid()::text || gen_random_uuid()::text, '-', '');
 ALTER TABLE billing ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
 ALTER TABLE billing ADD COLUMN IF NOT EXISTS station_snapshot jsonb;
+ALTER TABLE billing ADD COLUMN IF NOT EXISTS customer_gstin text;
 CREATE UNIQUE INDEX IF NOT EXISTS billing_public_token_idx ON billing (public_token);
 
 UPDATE billing b SET station_snapshot = jsonb_build_object(
   'name', o.name, 'address', COALESCE(o.address, ''), 'phone', COALESCE(o.phone, ''),
-  'gstin', COALESCE(o.gstin, ''), 'companyImage', s.company_image, 'bannerImage', s.banner_image
+  'gstin', COALESCE(o.gstin, ''), 'brand', COALESCE(o.brand, ''),
+  'companyImage', s.company_image, 'bannerImage', s.banner_image,
+  'tagline', COALESCE(o.bill->>'header', ''),
+  'footer', COALESCE(o.bill->>'footer', ''),
+  'showQr', COALESCE((o.bill->>'showQr')::boolean, true),
+  'showThanks', COALESCE((o.bill->>'showThanks')::boolean, true),
+  'showGstBreakup', COALESCE((o.bill->>'showGstBreakup')::boolean, true),
+  'pricesIncludeGst', COALESCE((o.bill->>'pricesIncludeGst')::boolean, false)
 )
 FROM outlets o JOIN settings s ON s.id = o.settings_id
 WHERE b.outlet_id = o.id AND b.station_snapshot IS NULL;
+
+UPDATE billing b
+SET station_snapshot = COALESCE(b.station_snapshot, '{}'::jsonb) || jsonb_build_object('brand', COALESCE(o.brand, ''))
+FROM outlets o
+WHERE b.outlet_id = o.id
+  AND (b.station_snapshot->>'brand' IS NULL OR b.station_snapshot->>'brand' = '');
 
 CREATE OR REPLACE FUNCTION snapshot_bill_station() RETURNS trigger
 LANGUAGE plpgsql AS $$
 BEGIN
   SELECT jsonb_build_object(
     'name', o.name, 'address', COALESCE(o.address, ''), 'phone', COALESCE(o.phone, ''),
-    'gstin', COALESCE(o.gstin, ''), 'companyImage', s.company_image, 'bannerImage', s.banner_image
+    'gstin', COALESCE(o.gstin, ''), 'brand', COALESCE(o.brand, ''),
+    'companyImage', s.company_image, 'bannerImage', s.banner_image,
+    'tagline', COALESCE(o.bill->>'header', ''),
+    'footer', COALESCE(o.bill->>'footer', ''),
+    'showQr', COALESCE((o.bill->>'showQr')::boolean, true),
+    'showThanks', COALESCE((o.bill->>'showThanks')::boolean, true),
+    'showGstBreakup', COALESCE((o.bill->>'showGstBreakup')::boolean, true),
+    'pricesIncludeGst', COALESCE((o.bill->>'pricesIncludeGst')::boolean, false)
   ) INTO NEW.station_snapshot
   FROM outlets o JOIN settings s ON s.id = o.settings_id WHERE o.id = NEW.outlet_id;
   RETURN NEW;

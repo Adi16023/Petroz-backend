@@ -83,10 +83,61 @@ export function parseVideoUrl(raw) {
   return null;
 }
 
+function parseIso8601Duration(value) {
+  const match = String(value ?? "").match(/^PT(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?$/i);
+  if (!match) return null;
+  const hours = Number(match[1] || 0);
+  const minutes = Number(match[2] || 0);
+  const seconds = Number(match[3] || 0);
+  return hours * 3600 + minutes * 60 + seconds;
+}
+
+async function youtubeDurationSeconds(videoId) {
+  const apiKey = process.env.YOUTUBE_API_KEY || process.env.GOOGLE_API_KEY;
+  if (apiKey) {
+    try {
+      const response = await fetch(
+        `https://www.googleapis.com/youtube/v3/videos?part=contentDetails&id=${encodeURIComponent(videoId)}&key=${encodeURIComponent(apiKey)}`,
+      );
+      if (response.ok) {
+        const data = await response.json();
+        const iso = data?.items?.[0]?.contentDetails?.duration;
+        const seconds = parseIso8601Duration(iso);
+        if (seconds != null) return seconds;
+      }
+    } catch {
+      // fall through to page parse
+    }
+  }
+
+  try {
+    const response = await fetch(`https://www.youtube.com/watch?v=${encodeURIComponent(videoId)}`, {
+      headers: {
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent":
+          "Mozilla/5.0 (compatible; PetrozzBot/1.0; +https://petrozz.com)",
+      },
+    });
+    if (!response.ok) return null;
+    const html = await response.text();
+    const lengthMatch = html.match(/"lengthSeconds":\s*"(\d+)"/);
+    if (lengthMatch) return Number(lengthMatch[1]);
+    const approxMatch = html.match(/"approxDurationMs":\s*"(\d+)"/);
+    if (approxMatch) return Math.round(Number(approxMatch[1]) / 1000);
+  } catch {
+    return null;
+  }
+  return null;
+}
+
 async function enrichVideoMeta(parsed) {
   if (!parsed) return { durationSeconds: null, thumbnailUrl: "" };
   if (parsed.provider === "youtube") {
-    return { durationSeconds: null, thumbnailUrl: parsed.thumbnailUrl };
+    const durationSeconds = await youtubeDurationSeconds(parsed.providerId);
+    return {
+      durationSeconds,
+      thumbnailUrl: parsed.thumbnailUrl,
+    };
   }
   if (parsed.provider === "vimeo") {
     try {
@@ -105,6 +156,25 @@ async function enrichVideoMeta(parsed) {
     }
   }
   return { durationSeconds: null, thumbnailUrl: parsed.thumbnailUrl || "" };
+}
+
+async function backfillMissingDuration(pool, row) {
+  if (row.duration_seconds != null) return row;
+  const parsed = parseVideoUrl(row.url);
+  if (!parsed) return row;
+  const meta = await enrichVideoMeta(parsed);
+  if (meta.durationSeconds == null && !meta.thumbnailUrl) return row;
+  const thumbnailUrl = row.thumbnail_url || meta.thumbnailUrl || "";
+  const { rows } = await pool.query(
+    `UPDATE video_tutorials SET
+       duration_seconds = COALESCE($2, duration_seconds),
+       thumbnail_url = CASE WHEN thumbnail_url = '' THEN $3 ELSE thumbnail_url END,
+       updated_at = updated_at
+     WHERE id = $1
+     RETURNING *`,
+    [row.id, meta.durationSeconds, thumbnailUrl],
+  );
+  return rows[0] || row;
 }
 
 function dto(row) {
@@ -148,7 +218,11 @@ export function registerPublicVideoTutorials(app, { pool, wrap, bad }) {
     const { rows } = await pool.query(
       `SELECT * FROM video_tutorials ORDER BY created_at DESC, updated_at DESC`,
     );
-    res.json(rows.map((row) => dto(row)));
+    const enriched = [];
+    for (const row of rows) {
+      enriched.push(row.duration_seconds == null ? await backfillMissingDuration(pool, row) : row);
+    }
+    res.json(enriched.map((row) => dto(row)));
   }));
 
   app.get("/api/public/video-tutorials/:slug", wrap(async (req, res) => {
@@ -168,7 +242,11 @@ export function registerVideoTutorials(app, { pool, wrap, bad, requireSuper }) {
     const { rows } = await pool.query(
       `SELECT * FROM video_tutorials ORDER BY updated_at DESC, created_at DESC`,
     );
-    res.json(rows.map((row) => dto(row)));
+    const enriched = [];
+    for (const row of rows) {
+      enriched.push(row.duration_seconds == null ? await backfillMissingDuration(pool, row) : row);
+    }
+    res.json(enriched.map((row) => dto(row)));
   }));
 
   app.get("/api/admin/video-tutorials/:id", wrap(async (req, res) => {

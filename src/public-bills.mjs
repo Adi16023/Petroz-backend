@@ -5,6 +5,7 @@ export function billDto(row) {
     billNo: row.bill_no,
     billedAt: row.billed_at,
     customerName: row.customer_name,
+    customerGstin: row.customer_gstin || null,
     vehicleNo: row.vehicle_no,
     mobile: row.mobile,
     paymentMode: row.payment_mode,
@@ -25,7 +26,7 @@ export function registerPublicBills(app, { pool, wrap, bad }) {
     res.set("Referrer-Policy", "no-referrer");
     if (!/^[a-f0-9]{64}$/.test(req.params.token)) throw bad("Bill not found or no longer available.", 404);
     const { rows } = await pool.query(
-      `SELECT bill_no, billed_at, customer_name, vehicle_no, mobile, payment_mode,
+      `SELECT bill_no, billed_at, customer_name, customer_gstin, vehicle_no, mobile, payment_mode,
               pump_nozzle, attendant, lines, total, station_snapshot
        FROM billing WHERE public_token = $1 AND cancelled_at IS NULL`,
       [req.params.token],

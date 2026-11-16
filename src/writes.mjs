@@ -1932,18 +1932,33 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   function billLines(body) {
     const raw = Array.isArray(body?.lines) ? body.lines : [];
     const lines = raw.map((line) => {
+      const kind = line?.kind === "product" ? "product" : "fuel";
       const fuel = String(line?.fuel ?? "").trim();
+      const unit = String(line?.unit ?? (kind === "product" ? "Nos" : "Ltr")).trim() || (kind === "product" ? "Nos" : "Ltr");
       const qty = money(line?.qty);
       const rate = money(line?.rate);
       const discount = money(line?.discount);
-      if (!fuel) throw bad("Pick a fuel type.");
-      if (!(qty > 0)) throw bad("Enter the litres.");
+      if (!fuel) throw bad(kind === "product" ? "Pick a product." : "Pick a fuel type.");
+      if (!(qty > 0)) throw bad(kind === "product" ? "Enter the quantity." : "Enter the litres.");
       if (rate < 0 || discount < 0) throw bad("Rate and discount stay at zero or above.");
       const amount = Math.max(0, round2(qty * rate - discount));
-      return { fuel, qty, rate, discount, amount };
+      return { fuel, qty, rate, discount, amount, kind, unit };
     });
-    if (!lines.length) throw bad("Add a fuel line.");
+    if (!lines.length) throw bad("Add a fuel or product line.");
     return lines;
+  }
+
+  function billGrandTotal(lines, outlet) {
+    const lineSum = round2(lines.reduce((sum, line) => sum + line.amount, 0));
+    const gstin = String(outlet.gstin || "").trim();
+    if (!gstin) return lineSum;
+    const bill = outlet.bill && typeof outlet.bill === "object" ? outlet.bill : {};
+    const showBreakup = bill.showGstBreakup !== false;
+    if (!showBreakup) return lineSum;
+    if (bill.pricesIncludeGst) return lineSum;
+    const cgst = round2(lineSum * 0.09);
+    const sgst = round2(lineSum * 0.09);
+    return round2(lineSum + cgst + sgst);
   }
 
   async function nextBillNo(outlet) {
@@ -1972,6 +1987,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       address: outlet.address || "",
       phone: outlet.phone || "",
       gstin: outlet.gstin || "",
+      brand: outlet.brand || "",
       ownerWhatsapp: outlet.owner_whatsapp || "",
       nextBillNumber: next.n,
       nextBillNo: next.label,
@@ -1994,16 +2010,16 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const paymentMode = match?.name || wanted || "Cash";
     const billedAt = req.body?.billedAt ? new Date(req.body.billedAt) : new Date();
     if (Number.isNaN(billedAt.getTime())) throw bad("Pick a date and time.");
-    const total = round2(lines.reduce((sum, line) => sum + line.amount, 0));
+    const total = billGrandTotal(lines, outlet);
     const next = await nextBillNo(outlet);
     const billNo = next.label;
     let rows;
     try {
       ({ rows } = await pool.query(
         `INSERT INTO billing (
-           settings_id, outlet_id, bill_no, billed_at, customer_name, vehicle_no, mobile,
+           settings_id, outlet_id, bill_no, billed_at, customer_name, customer_gstin, vehicle_no, mobile,
            payment_mode, pump_nozzle, attendant, lines, total, created_by
-         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12,$13)
+         ) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13,$14)
          RETURNING *`,
         [
           outlet.settings_id,
@@ -2011,6 +2027,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
           billNo,
           billedAt.toISOString(),
           String(req.body?.customerName ?? "").trim() || null,
+          String(req.body?.customerGstin ?? "").trim().toUpperCase() || null,
           String(req.body?.vehicleNo ?? "").trim() || null,
           String(req.body?.mobile ?? "").trim() || null,
           paymentMode,
