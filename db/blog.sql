@@ -21,3 +21,6 @@ CREATE INDEX IF NOT EXISTS blog_posts_status_published_idx
 
 CREATE INDEX IF NOT EXISTS blog_posts_updated_idx
   ON blog_posts (updated_at DESC);
+
+ALTER TABLE blog_posts
+  ADD COLUMN IF NOT EXISTS tags text[] NOT NULL DEFAULT '{}'::text[];

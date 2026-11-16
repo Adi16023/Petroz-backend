@@ -13,7 +13,7 @@ import { registerWrites } from "./writes.mjs";
 import { registerPublicBills } from "./public-bills.mjs";
 import { registerContacts } from "./contacts.mjs";
 import { registerOffers } from "./offers.mjs";
-import { registerBlog } from "./blog.mjs";
+import { registerBlog, registerPublicBlog } from "./blog.mjs";
 import { registerStockAudits } from "./stock-audits.mjs";
 import { withDocumentCashiers } from "./shift-cashiers.mjs";
 import { shiftReadingQty } from "./shift-readings.mjs";
@@ -201,6 +201,7 @@ app.post("/api/login", wrap(async (req, res) => {
 }));
 
 registerPublicBills(app, { pool, wrap, bad });
+registerPublicBlog(app, { pool, wrap, bad });
 app.use("/api", auth);
 
 app.get("/api/me", wrap(async (req, res) => {

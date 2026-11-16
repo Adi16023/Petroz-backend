@@ -46,6 +46,27 @@ function mediaPublicPath(fileId) {
   return `/api/public/blog/media/${fileId}`;
 }
 
+
+function normalizeTags(value) {
+  const list = Array.isArray(value)
+    ? value
+    : typeof value === "string"
+      ? value.split(/[,\n]/)
+      : [];
+  const seen = new Set();
+  const tags = [];
+  for (const item of list) {
+    const tag = String(item ?? "").trim().replace(/\s+/g, " ").slice(0, 40);
+    if (!tag) continue;
+    const key = tag.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    tags.push(tag);
+    if (tags.length >= 12) break;
+  }
+  return tags;
+}
+
 function dto(row, { publicView = false } = {}) {
   return {
     id: row.id,
@@ -53,6 +74,7 @@ function dto(row, { publicView = false } = {}) {
     title: row.title,
     subtitle: row.subtitle || "",
     excerpt: row.excerpt || "",
+    tags: Array.isArray(row.tags) ? row.tags : [],
     category: row.category || "",
     coverFileId: row.cover_file_id || null,
     coverUrl: row.cover_file_id ? mediaPublicPath(row.cover_file_id) : null,
@@ -76,7 +98,10 @@ function validatePost(body, bad, { partial = false } = {}) {
     data.subtitle = String(body.subtitle ?? "").trim().slice(0, 300);
   }
   if (!partial || body.excerpt !== undefined) {
-    data.excerpt = String(body.excerpt ?? "").trim().slice(0, 500);
+    data.excerpt = String(body.excerpt ?? "").trim().slice(0, 160);
+  }
+  if (!partial || body.tags !== undefined) {
+    data.tags = normalizeTags(body.tags);
   }
   if (!partial || body.category !== undefined) {
     data.category = String(body.category ?? "").trim().slice(0, 80);
@@ -106,7 +131,7 @@ function validatePost(body, bad, { partial = false } = {}) {
   return data;
 }
 
-export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
+export function registerPublicBlog(app, { pool, wrap, bad }) {
   app.get("/api/public/blog/media/:id", wrap(async (req, res) => {
     if (!UUID.test(req.params.id)) throw bad("File not found.", 404);
     const { rows } = await pool.query(
@@ -142,7 +167,9 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
     if (!rows.length) throw bad("Post not found.", 404);
     res.json(dto(rows[0], { publicView: true }));
   }));
+}
 
+export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
   app.get("/api/admin/blog", wrap(async (req, res) => {
     requireSuper(req.user);
     res.set("Cache-Control", "no-store");
@@ -168,20 +195,22 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
     data.bodyJson = data.bodyJson ?? {};
     data.subtitle = data.subtitle ?? "";
     data.excerpt = data.excerpt ?? "";
+    data.tags = data.tags ?? [];
     data.category = data.category ?? "";
     data.coverFileId = data.coverFileId ?? null;
     data.slug = await uniqueSlug(pool, data.slug || data.title);
     const publishedAt = data.status === "published" ? new Date().toISOString() : null;
     const { rows } = await pool.query(
       `INSERT INTO blog_posts
-         (slug, title, subtitle, excerpt, category, cover_file_id, body_html, body_json, status, published_at, author_id)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+         (slug, title, subtitle, excerpt, tags, category, cover_file_id, body_html, body_json, status, published_at, author_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
        RETURNING *`,
       [
         data.slug,
         data.title,
         data.subtitle,
         data.excerpt,
+        data.tags,
         data.category,
         data.coverFileId,
         data.bodyHtml,
@@ -214,12 +243,13 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
          title = $3,
          subtitle = COALESCE($4, subtitle),
          excerpt = COALESCE($5, excerpt),
-         category = COALESCE($6, category),
-         cover_file_id = CASE WHEN $7::boolean THEN $8::uuid ELSE cover_file_id END,
-         body_html = COALESCE($9, body_html),
-         body_json = COALESCE($10::jsonb, body_json),
-         status = $11,
-         published_at = $12,
+         tags = CASE WHEN $6::boolean THEN $7::text[] ELSE tags END,
+         category = COALESCE($8, category),
+         cover_file_id = CASE WHEN $9::boolean THEN $10::uuid ELSE cover_file_id END,
+         body_html = COALESCE($11, body_html),
+         body_json = COALESCE($12::jsonb, body_json),
+         status = $13,
+         published_at = $14,
          updated_at = now()
        WHERE id = $1
        RETURNING *`,
@@ -229,6 +259,8 @@ export function registerBlog(app, { pool, wrap, bad, requireSuper }) {
         title,
         data.subtitle ?? null,
         data.excerpt ?? null,
+        data.tags !== undefined,
+        data.tags ?? [],
         data.category ?? null,
         data.coverFileId !== undefined,
         data.coverFileId ?? null,
