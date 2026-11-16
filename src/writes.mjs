@@ -1956,7 +1956,12 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const showBreakup = bill.showGstBreakup !== false;
     if (!showBreakup) return lineSum;
     if (bill.pricesIncludeGst) return lineSum;
-    const cgst = round2(lineSum * 0.09);
+    const gstRate =
+      bill.gstRate != null && Number.isFinite(Number(bill.gstRate))
+        ? Math.max(0, Number(bill.gstRate))
+        : 9;
+    if (!(gstRate > 0)) return lineSum;
+    const cgst = round2(lineSum * (gstRate / 100));
     return round2(lineSum + cgst);
   }
 
