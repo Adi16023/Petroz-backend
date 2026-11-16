@@ -1969,8 +1969,9 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (bill.pricesIncludeGst) return lineSum;
     const gstRate = resolveGstRate(outlet, rateOverride);
     if (!(gstRate > 0)) return lineSum;
-    const cgst = round2(lineSum * (gstRate / 100));
-    return round2(lineSum + cgst);
+    // gstRate is total GST; CGST + SGST each take half, so the grand total still adds the full rate.
+    const tax = round2(lineSum * (gstRate / 100));
+    return round2(lineSum + tax);
   }
 
   function outletBillAddress(outlet) {
