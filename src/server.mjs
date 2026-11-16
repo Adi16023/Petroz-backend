@@ -963,6 +963,11 @@ app.post("/api/admin/users", wrap(async (req, res) => {
 }));
 
 app.get("/api/notifications", wrap(async (req, res) => {
+  // Dealer desk alerts are for outlet owners/managers — not the platform super admin.
+  if (req.user.role === "super_admin") {
+    res.set("Cache-Control", "no-store");
+    return res.json([]);
+  }
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   const dealer = await pool.query(`SELECT variance_alert FROM settings WHERE id = $1`, [outlet.settings_id]);
   const alertAt = num(dealer.rows[0]?.variance_alert) ?? 200;
