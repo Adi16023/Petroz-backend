@@ -659,7 +659,7 @@ UPDATE billing b SET station_snapshot = jsonb_build_object(
   'showThanks', COALESCE((o.bill->>'showThanks')::boolean, true),
   'showGstBreakup', COALESCE((o.bill->>'showGstBreakup')::boolean, true),
   'pricesIncludeGst', COALESCE((o.bill->>'pricesIncludeGst')::boolean, false),
-  'gstRate', COALESCE((o.bill->>'gstRate')::numeric, 9)
+  'gstRate', COALESCE((o.bill->>'gstRate')::numeric, 0)
 )
 FROM outlets o JOIN settings s ON s.id = o.settings_id
 WHERE b.outlet_id = o.id AND b.station_snapshot IS NULL;
@@ -705,7 +705,7 @@ BEGIN
     'showThanks', COALESCE((o.bill->>'showThanks')::boolean, true),
     'showGstBreakup', COALESCE((o.bill->>'showGstBreakup')::boolean, true),
     'pricesIncludeGst', COALESCE((o.bill->>'pricesIncludeGst')::boolean, false),
-    'gstRate', COALESCE((o.bill->>'gstRate')::numeric, 9)
+    'gstRate', COALESCE((o.bill->>'gstRate')::numeric, 0)
   ) INTO NEW.station_snapshot
   FROM outlets o JOIN settings s ON s.id = o.settings_id WHERE o.id = NEW.outlet_id;
   RETURN NEW;

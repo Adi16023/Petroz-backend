@@ -1948,7 +1948,18 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     return lines;
   }
 
-  function billGrandTotal(lines, outlet) {
+  function resolveGstRate(outlet, rateOverride) {
+    if (rateOverride != null && Number.isFinite(Number(rateOverride))) {
+      return Math.max(0, Number(rateOverride));
+    }
+    const bill = outlet.bill && typeof outlet.bill === "object" ? outlet.bill : {};
+    if (bill.gstRate != null && Number.isFinite(Number(bill.gstRate))) {
+      return Math.max(0, Number(bill.gstRate));
+    }
+    return 0;
+  }
+
+  function billGrandTotal(lines, outlet, rateOverride) {
     const lineSum = round2(lines.reduce((sum, line) => sum + line.amount, 0));
     const gstin = String(outlet.gstin || "").trim();
     if (!gstin) return lineSum;
@@ -1956,10 +1967,7 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const showBreakup = bill.showGstBreakup !== false;
     if (!showBreakup) return lineSum;
     if (bill.pricesIncludeGst) return lineSum;
-    const gstRate =
-      bill.gstRate != null && Number.isFinite(Number(bill.gstRate))
-        ? Math.max(0, Number(bill.gstRate))
-        : 9;
+    const gstRate = resolveGstRate(outlet, rateOverride);
     if (!(gstRate > 0)) return lineSum;
     const cgst = round2(lineSum * (gstRate / 100));
     return round2(lineSum + cgst);
@@ -2024,7 +2032,15 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     const paymentMode = match?.name || wanted || "Cash";
     const billedAt = req.body?.billedAt ? new Date(req.body.billedAt) : new Date();
     if (Number.isNaN(billedAt.getTime())) throw bad("Pick a date and time.");
-    const total = billGrandTotal(lines, outlet);
+    const rateOverride = Object.prototype.hasOwnProperty.call(req.body ?? {}, "gstRate")
+      ? req.body.gstRate
+      : undefined;
+    if (rateOverride != null && rateOverride !== "" && !Number.isFinite(Number(rateOverride))) {
+      throw bad("GST % must be a number.");
+    }
+    if (rateOverride != null && Number(rateOverride) < 0) throw bad("GST % cannot be negative.");
+    const gstRate = resolveGstRate(outlet, rateOverride);
+    const total = billGrandTotal(lines, outlet, rateOverride);
     const next = await nextBillNo(outlet);
     const billNo = next.label;
     let rows;
@@ -2056,10 +2072,17 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
       if (error.code === "23505") throw bad("That bill number was just used. Save again.");
       throw error;
     }
+    const { rows: snapped } = await pool.query(
+      `UPDATE billing
+       SET station_snapshot = COALESCE(station_snapshot, '{}'::jsonb) || jsonb_build_object('gstRate', $2::numeric)
+       WHERE id = $1
+       RETURNING *`,
+      [rows[0].id, gstRate],
+    );
     await pool.query(`UPDATE outlets SET next_bill_no = $2 WHERE id = $1`, [outlet.id, next.n + 1]);
     await log(req.user, outlet.id, "created", `Bill ${billNo}`, "billing", rows[0].id);
     const following = await nextBillNo({ ...outlet, next_bill_no: next.n + 1 });
-    res.status(201).json({ bill: billDto(rows[0]), nextBillNo: following.label });
+    res.status(201).json({ bill: billDto(snapped[0] || rows[0]), nextBillNo: following.label });
   }));
 
   app.patch("/api/billing/:id/cancel", wrap(async (req, res) => {
