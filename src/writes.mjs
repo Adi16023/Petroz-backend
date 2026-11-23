@@ -1969,8 +1969,13 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
     if (bill.pricesIncludeGst) return lineSum;
     const gstRate = resolveGstRate(outlet, rateOverride);
     if (!(gstRate > 0)) return lineSum;
+    // GST on product / lube lines only — fuel stays outside the tax base.
+    const productSum = round2(
+      lines.filter((line) => line.kind === "product").reduce((sum, line) => sum + line.amount, 0),
+    );
+    if (!(productSum > 0)) return lineSum;
     // gstRate is total GST; CGST + SGST each take half, so the grand total still adds the full rate.
-    const tax = round2(lineSum * (gstRate / 100));
+    const tax = round2(productSum * (gstRate / 100));
     return round2(lineSum + tax);
   }
 

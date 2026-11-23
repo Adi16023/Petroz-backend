@@ -1108,81 +1108,216 @@ app.get("/api/notifications", wrap(async (req, res) => {
 
   const rank = { bad: 0, warn: 1, info: 2 };
   notes.sort((a, b) => rank[a.tone] - rank[b.tone]);
-  res.json(notes);
+
+  let unread = notes;
+  try {
+    const reads = await pool.query(
+      `SELECT notification_id, text
+       FROM notification_reads
+       WHERE user_id = $1 AND outlet_id = $2`,
+      [req.user.id, outlet.id],
+    );
+    const readText = new Map(reads.rows.map((row) => [row.notification_id, row.text]));
+    // Hide only while the live alert still matches what the user dismissed.
+    unread = notes.filter((note) => readText.get(note.id) !== note.text);
+  } catch {
+    // Table not migrated yet — show the live list unchanged.
+  }
+  res.set("Cache-Control", "no-store");
+  res.json(unread);
+}));
+
+app.get("/api/notifications/history", wrap(async (req, res) => {
+  if (req.user.role === "super_admin") {
+    res.set("Cache-Control", "no-store");
+    return res.json([]);
+  }
+  const outlet = await assertOutlet(pool, req.user, req.query.outletId);
+  try {
+    const { rows } = await pool.query(
+      `SELECT notification_id AS id, tone, text, href, read_at AS "readAt"
+       FROM notification_reads
+       WHERE user_id = $1 AND outlet_id = $2
+       ORDER BY read_at DESC
+       LIMIT 100`,
+      [req.user.id, outlet.id],
+    );
+    res.set("Cache-Control", "no-store");
+    return res.json(rows);
+  } catch {
+    res.set("Cache-Control", "no-store");
+    return res.json([]);
+  }
+}));
+
+app.post("/api/notifications/read", wrap(async (req, res) => {
+  if (req.user.role === "super_admin") {
+    return res.json({ ok: true, count: 0 });
+  }
+  const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
+  const items = Array.isArray(req.body?.items) ? req.body.items : [];
+  if (!items.length) throw bad("Nothing to mark as read.");
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    let count = 0;
+    for (const item of items) {
+      const id = String(item?.id ?? "").trim();
+      const text = String(item?.text ?? "").trim();
+      const tone = ["bad", "warn", "info"].includes(item?.tone) ? item.tone : "info";
+      const href = String(item?.href ?? "/").trim() || "/";
+      if (!id || !text) continue;
+      await client.query(
+        `INSERT INTO notification_reads (user_id, outlet_id, notification_id, tone, text, href, read_at)
+         VALUES ($1, $2, $3, $4, $5, $6, now())
+         ON CONFLICT (user_id, outlet_id, notification_id)
+         DO UPDATE SET tone = EXCLUDED.tone, text = EXCLUDED.text, href = EXCLUDED.href, read_at = now()`,
+        [req.user.id, outlet.id, id, tone, text, href],
+      );
+      count += 1;
+    }
+    await client.query("COMMIT");
+    res.json({ ok: true, count });
+  } catch (error) {
+    await client.query("ROLLBACK");
+    throw error;
+  } finally {
+    client.release();
+  }
 }));
 
 app.get("/api/dashboard", wrap(async (req, res) => {
   const outlet = await assertOutlet(pool, req.user, req.query.outletId);
   await promoteDueShifts(pool, outlet.id);
-  const openResult = await pool.query(
-    `SELECT * FROM shifts WHERE outlet_id = $1 AND status = 'open' ORDER BY starts_at DESC LIMIT 1`,
-    [outlet.id],
-  );
-  const open = openResult.rows[0] ?? null;
-  const sales = await pool.query(
-    `SELECT s.net, s.mode, s.created_at, pr.kind AS product_kind, pr.name AS product_name
-     FROM sales s
-     LEFT JOIN sale_items l ON l.sale_id = s.id
-     LEFT JOIN products pr ON pr.id = l.product_id
-     WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
-       AND s.shift_id IS NOT DISTINCT FROM $2::uuid`,
-    [outlet.id, open?.id ?? null],
-  );
-  const yesterday = await pool.query(
-    `SELECT COALESCE(SUM(s.net), 0) AS total,
-            COALESCE(SUM(s.net) FILTER (WHERE pr.kind = 'fuel'), 0) AS fuel,
-            COALESCE(SUM(s.net) FILTER (WHERE pr.kind IN ('lube', 'fmcg')), 0) AS shop,
-            COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'cash'), 0) AS cash,
-            COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'credit'), 0) AS credit
-     FROM sales s
-     LEFT JOIN sale_items l ON l.sale_id = s.id
-     LEFT JOIN products pr ON pr.id = l.product_id
-     WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
-       AND s.doc_date = CURRENT_DATE - 1`,
-    [outlet.id],
-  );
-  const tanks = await pool.query(
-    `SELECT e.id, e.label, e.live_qty, e.capacity, pr.name AS product
-     FROM equipment e LEFT JOIN products pr ON pr.id = e.product_id
-     WHERE e.outlet_id = $1 AND e.kind = 'tank'
-     ORDER BY e.label`,
-    [outlet.id],
-  );
 
-  const bills = open ? sales.rows : [];
-  const sum = (rows, pred = () => true) => rows.filter(pred).reduce((n, row) => n + num(row.net), 0);
-  const byHour = [];
-  if (open) {
-    const start = new Date(open.starts_at).getHours();
-    const end = new Date(open.ends_at).getHours();
-    for (let hour = start; hour <= end; hour += 1) {
-      const amount = sum(bills, (row) => new Date(row.created_at).getHours() === hour);
-      byHour.push({ hour: String(hour).padStart(2, "0"), amount });
-    }
+  const settings = await pool.query(
+    `SELECT company_image, banner_image, desk FROM settings WHERE id = $1`,
+    [outlet.settings_id],
+  );
+  const desk = settings.rows[0]?.desk && typeof settings.rows[0].desk === "object" ? settings.rows[0].desk : {};
+  const businessDayEnd = typeof desk.businessDayEnd === "string" ? desk.businessDayEnd : "00:00";
+
+  const [todaySales, weekSales, expensesToday, tanks, fuels, shifts] = await Promise.all([
+    pool.query(
+      `SELECT s.net, s.mode, pr.kind AS product_kind, pr.name AS product_name
+       FROM sales s
+       LEFT JOIN sale_items l ON l.sale_id = s.id
+       LEFT JOIN products pr ON pr.id = l.product_id
+       WHERE s.outlet_id = $1 AND s.status <> 'cancelled' AND s.doc_date = CURRENT_DATE`,
+      [outlet.id],
+    ),
+    pool.query(
+      `SELECT to_char(s.doc_date, 'YYYY-MM-DD') AS day,
+              COALESCE(SUM(s.net), 0) AS sales,
+              COALESCE(SUM(s.net) FILTER (WHERE pr.kind = 'fuel'), 0) AS fuel,
+              COALESCE(SUM(s.net) FILTER (WHERE pr.kind IN ('lube', 'fmcg')), 0) AS shop,
+              COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'cash'), 0) AS cash,
+              COALESCE(SUM(s.net) FILTER (WHERE s.mode = 'credit'), 0) AS credit
+       FROM sales s
+       LEFT JOIN sale_items l ON l.sale_id = s.id
+       LEFT JOIN products pr ON pr.id = l.product_id
+       WHERE s.outlet_id = $1 AND s.status <> 'cancelled'
+         AND s.doc_date >= CURRENT_DATE - 6 AND s.doc_date <= CURRENT_DATE
+       GROUP BY s.doc_date
+       ORDER BY s.doc_date`,
+      [outlet.id],
+    ),
+    pool.query(
+      `SELECT COALESCE(SUM(net), 0) AS total
+       FROM expenses
+       WHERE outlet_id = $1 AND kind = 'expense' AND status <> 'rejected'
+         AND doc_date = CURRENT_DATE`,
+      [outlet.id],
+    ).catch(() => ({ rows: [{ total: 0 }] })),
+    pool.query(
+      `SELECT e.id, e.label, e.live_qty, e.capacity, pr.name AS product, pr.id AS product_id
+       FROM equipment e LEFT JOIN products pr ON pr.id = e.product_id
+       WHERE e.outlet_id = $1 AND e.kind = 'tank'
+       ORDER BY e.label`,
+      [outlet.id],
+    ),
+    pool.query(
+      `SELECT id, name, selling_price
+       FROM products
+       WHERE settings_id = $1 AND kind = 'fuel'
+       ORDER BY name`,
+      [outlet.settings_id],
+    ),
+    pool.query(
+      `SELECT *
+       FROM shifts
+       WHERE outlet_id = $1
+         AND starts_at::date <= CURRENT_DATE
+         AND ends_at::date >= CURRENT_DATE
+       ORDER BY starts_at`,
+      [outlet.id],
+    ),
+  ]);
+
+  const bills = todaySales.rows;
+  const sum = (rows, pred = () => true) => rows.filter(pred).reduce((n, row) => n + (num(row.net) || 0), 0);
+  const salesTotal = sum(bills);
+  const fuelTotal = sum(bills, (row) => row.product_kind === "fuel");
+  const shopTotal = sum(bills, (row) => row.product_kind === "lube" || row.product_kind === "fmcg");
+  const cashTotal = sum(bills, (row) => row.mode === "cash");
+  const creditTotal = sum(bills, (row) => row.mode === "credit");
+  const expenseTotal = num(expensesToday.rows[0]?.total) || 0;
+  const netProfit = salesTotal - expenseTotal;
+
+  const weekMap = new Map(weekSales.rows.map((row) => [row.day, row]));
+  const byDay = [];
+  for (let i = 6; i >= 0; i -= 1) {
+    const d = new Date();
+    d.setHours(12, 0, 0, 0);
+    d.setDate(d.getDate() - i);
+    const key = d.toISOString().slice(0, 10);
+    const row = weekMap.get(key);
+    byDay.push({
+      date: key,
+      sales: num(row?.sales) || 0,
+      fuel: num(row?.fuel) || 0,
+      shop: num(row?.shop) || 0,
+      cash: num(row?.cash) || 0,
+      credit: num(row?.credit) || 0,
+    });
   }
-  const tenders = ["cash", "upi", "card", "credit"];
+
+  const productOrder = ["MS", "HSD", "POWER", "LUBE", "FMCG"];
+  const byProductMap = new Map();
+  for (const row of bills) {
+    const name = String(row.product_name || "").toUpperCase();
+    let key = "OTHER";
+    if (name.includes("POWER") || name.includes("XP")) key = "POWER";
+    else if (name.includes("HSD") || name.includes("DIESEL")) key = "HSD";
+    else if (name.includes("MS") || name.includes("PETROL")) key = "MS";
+    else if (row.product_kind === "lube") key = "LUBE";
+    else if (row.product_kind === "fmcg") key = "FMCG";
+    byProductMap.set(key, (byProductMap.get(key) || 0) + (num(row.net) || 0));
+  }
+
+  res.set("Cache-Control", "no-store");
   res.json({
     outletId: outlet.id,
-    openShift: open ? shiftDto(open) : null,
-    totals: {
-      sales: sum(bills),
-      fuel: sum(bills, (row) => row.product_kind === "fuel"),
-      shop: sum(bills, (row) => row.product_kind === "lube" || row.product_kind === "fmcg"),
-      cash: sum(bills, (row) => row.mode === "cash"),
-      credit: sum(bills, (row) => row.mode === "credit"),
+    branch: {
+      id: outlet.id,
+      name: outlet.name,
+      code: outlet.code,
+      brand: outlet.brand || null,
+      businessDayEnd,
     },
-    yesterday: {
-      sales: num(yesterday.rows[0].total),
-      fuel: num(yesterday.rows[0].fuel),
-      shop: num(yesterday.rows[0].shop),
-      cash: num(yesterday.rows[0].cash),
-      credit: num(yesterday.rows[0].credit),
+    bannerImage: settings.rows[0]?.banner_image || null,
+    cards: {
+      sales: salesTotal,
+      fuel: fuelTotal,
+      shop: shopTotal,
+      cash: cashTotal,
+      credit: creditTotal,
+      netProfit,
     },
-    byHour,
-    byTender: tenders.map((tender) => ({ tender, amount: sum(bills, (row) => row.mode === tender) })),
-    byProduct: [...new Set(bills.map((row) => row.product_name).filter(Boolean))].map((product) => ({
+    byDay,
+    byProduct: productOrder.map((product) => ({
       product,
-      amount: sum(bills, (row) => row.product_name === product),
+      amount: byProductMap.get(product) || 0,
     })),
     tanks: tanks.rows.map((row) => ({
       id: row.id,
@@ -1191,6 +1326,33 @@ app.get("/api/dashboard", wrap(async (req, res) => {
       liveQty: num(row.live_qty),
       capacity: num(row.capacity),
     })),
+    fuels: fuels.rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      rate: num(row.selling_price) || 0,
+    })),
+    shifts: shifts.rows.map((row) => {
+      const duties = Array.isArray(row.duties) ? row.duties : [];
+      const staff = duties
+        .map((duty) => ({
+          id: duty.userId || duty.staffId || null,
+          name: duty.name || duty.userName || "",
+          designation: duty.designation || "",
+        }))
+        .filter((person) => person.id || person.name);
+      const pumps = [...new Set(duties.flatMap((duty) => {
+        if (Array.isArray(duty.nozzleIds)) return duty.nozzleIds;
+        if (duty.nozzleId) return [duty.nozzleId];
+        return [];
+      }).map(String).filter(Boolean))];
+      return {
+        ...shiftDto(row),
+        type: row.label,
+        staff,
+        pumps,
+      };
+    }),
+    notifications: [],
   });
 }));
 
