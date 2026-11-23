@@ -5,7 +5,12 @@ import { putObjectBytes, signedUrl, storageConfigured } from "./files.mjs";
 const inflight = new Map();
 
 function frontendOrigin() {
-  const raw = process.env.FRONTEND_URL || process.env.PUBLIC_APP_URL || process.env.APP_ORIGIN || "";
+  // Production desk is fixed; override only for local/staging.
+  const raw =
+    process.env.FRONTEND_URL ||
+    process.env.PUBLIC_APP_URL ||
+    process.env.APP_ORIGIN ||
+    "https://app.petrozz.com";
   return raw.replace(/\/$/, "");
 }
 
@@ -33,15 +38,11 @@ async function launchBrowser() {
 
 /**
  * Print the live public bill page with Chromium (same CSS engine as Print → Save as PDF).
- * Requires FRONTEND_URL (e.g. https://app.petrozz.com) and S3 file storage.
+ * Opens the public bill page (default https://app.petrozz.com). Override with FRONTEND_URL for local/staging.
+ * Requires S3 file storage to cache the result.
  */
 export async function renderBillPdfBytes(publicToken) {
   const origin = frontendOrigin();
-  if (!origin) {
-    const error = new Error("FRONTEND_URL is not configured for PDF generation.");
-    error.status = 503;
-    throw error;
-  }
   if (!/^[a-f0-9]{64}$/.test(publicToken)) {
     const error = new Error("Invalid bill token.");
     error.status = 400;

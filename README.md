@@ -33,7 +33,7 @@ Authenticated `PATCH /api/billing/:id/cancel` with `{ "outletId": "..." }` verif
 
 Bills may store one cached A4 PDF in the same S3-compatible bucket as `files` (`AWS_ENDPOINT_URL_S3`, keys, etc.). Object key pattern: `{outletId}/bill-pdf/{billId}.pdf`. Postgres keeps `billing.pdf_object_key` as the pointer; `billDto` exposes `pdfReady` (boolean only).
 
-**Generate (Chromium):** on cache miss, `GET …/pdf` (default `generate=1`) launches Puppeteer, opens `{FRONTEND_URL}/bill/{publicToken}`, prints A4 with backgrounds, uploads to S3, then returns a signed URL. Set `FRONTEND_URL` (desk/app origin) and S3 env vars. Optional `PUPPETEER_EXECUTABLE_PATH` if the host needs a system Chrome. Pass `generate=0` to only check the cache. Concurrent requests for the same bill share one in-flight render.
+**Generate (Chromium):** on cache miss, `GET …/pdf` (default `generate=1`) launches Puppeteer, opens `{FRONTEND_URL or https://app.petrozz.com}/bill/{publicToken}`, prints A4 with backgrounds, uploads to S3, then returns a signed URL. S3 env vars are required; `FRONTEND_URL` is optional (override for local/staging). Optional `PUPPETEER_EXECUTABLE_PATH` if the host needs a system Chrome. Pass `generate=0` to only check the cache. Concurrent requests for the same bill share one in-flight render.
 
 - `GET /api/billing/:id/pdf?outletId=…` (auth) → `{ ready, url, billNo, cached? }`
 - `PUT /api/billing/:id/pdf` (auth) with `{ outletId, data }` (base64 PDF, max 12 MB) uploads/replaces without Chromium
