@@ -89,19 +89,43 @@ export async function renderBillPdfBytes(publicToken) {
       throw fail(`Bill page loaded but invoice layout was missing (${url}).`, 503);
     }
 
-    // Match desk Print A4: hide on-screen chrome, zero margins.
+    // Match desk Print A4: hide chrome, collapse min-height so Chromium does not emit a blank 2nd page.
     await page.addStyleTag({
       content: `
+        @page { size: A4; margin: 0; }
         .print\\:hidden, [class*="print:hidden"] { display: none !important; }
-        html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
-        .public-bill { margin: 0 auto !important; box-shadow: none !important; }
+        html, body {
+          margin: 0 !important;
+          padding: 0 !important;
+          background: #fff !important;
+          height: auto !important;
+          min-height: 0 !important;
+          overflow: hidden !important;
+        }
+        main, main > div {
+          margin: 0 !important;
+          padding: 0 !important;
+          min-height: 0 !important;
+          height: auto !important;
+          overflow: visible !important;
+          background: #fff !important;
+        }
+        .public-bill {
+          margin: 0 auto !important;
+          box-shadow: none !important;
+          min-height: 0 !important;
+          height: auto !important;
+          max-height: none !important;
+          page-break-after: avoid !important;
+          break-after: avoid !important;
+        }
       `,
     });
 
     const bytes = await page.pdf({
       format: "A4",
       printBackground: true,
-      preferCSSPageSize: true,
+      preferCSSPageSize: false,
       margin: { top: "0", right: "0", bottom: "0", left: "0" },
     });
     return Buffer.from(bytes);

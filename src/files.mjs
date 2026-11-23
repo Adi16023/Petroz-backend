@@ -50,6 +50,17 @@ export async function deleteObject(key) {
   }
 }
 
+/** Read object bytes from S3 (for proxying bill PDFs through the API). */
+export async function getObjectBytes(key) {
+  const client = storage();
+  if (!client || !key) return null;
+  const out = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }));
+  const body = out.Body;
+  if (!body) return null;
+  const bytes = Buffer.from(await body.transformToByteArray());
+  return { bytes, contentType: out.ContentType || "application/pdf" };
+}
+
 export function registerFiles(app, { pool, wrap, bad, assertOutlet }) {
   app.post("/api/files", wrap(async (req, res) => {
     const client = storage();

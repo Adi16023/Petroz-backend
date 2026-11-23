@@ -88,11 +88,18 @@ test("bill PDF cache pointer, public readiness, and cancel clear the key", async
 
     const missing = await request(`/api/billing/${bill.id}/pdf?outletId=${outletId}&generate=0`);
     assert.equal(missing.status, 200);
-    assert.deepEqual(await missing.json(), { ready: false, url: null, billNo: bill.billNo });
+    assert.deepEqual(await missing.json(), {
+      ready: false,
+      url: null,
+      billNo: bill.billNo,
+      downloadPath: `/api/billing/${bill.id}/pdf/file?outletId=${outletId}`,
+    });
 
     const publicMissing = await request(`/api/public/bills/${bill.publicToken}/pdf?generate=0`, { auth: false });
     assert.equal(publicMissing.status, 200);
-    assert.equal((await publicMissing.json()).ready, false);
+    const publicBody = await publicMissing.json();
+    assert.equal(publicBody.ready, false);
+    assert.equal(publicBody.downloadPath, `/api/public/bills/${bill.publicToken}/pdf/file`);
 
     // Simulate a worker having uploaded: set pointer only (S3 not configured in test).
     const key = billPdfObjectKey(outletId, bill.id);
