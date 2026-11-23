@@ -8,6 +8,7 @@ import { assertOutlet, login, outletIdsFor, requireAuth, signToken } from "./aut
 import { ensureDemo } from "./demo.mjs";
 import { ensureAttendanceUser, ensureSeed, ensureSuperAdmin } from "./seed.mjs";
 import { promoteDueShifts } from "./shift-entry.mjs";
+import { registerBillPdf, registerPublicBillPdf } from "./bill-pdf.mjs";
 import { registerFiles, signedUrl } from "./files.mjs";
 import { registerWrites } from "./writes.mjs";
 import { registerPublicBills } from "./public-bills.mjs";
@@ -202,6 +203,7 @@ app.post("/api/login", wrap(async (req, res) => {
 }));
 
 registerPublicBills(app, { pool, wrap, bad });
+registerPublicBillPdf(app, { pool, wrap, bad });
 registerPublicBlog(app, { pool, wrap, bad });
 registerPublicVideoTutorials(app, { pool, wrap, bad });
 app.use("/api", auth);
@@ -2066,6 +2068,7 @@ app.get("/api/activity", wrap(async (req, res) => {
 }));
 
 registerFiles(app, { pool, wrap, bad, assertOutlet });
+registerBillPdf(app, { pool, wrap, bad, assertOutlet });
 registerContacts(app, { pool, wrap, bad, assertOutlet });
 registerOffers(app, { pool, wrap, bad, assertOutlet });
 registerStockAudits(app, { pool, wrap, bad, assertOutlet });

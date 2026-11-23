@@ -80,6 +80,7 @@ test("public bill links persist, expose only bill content, and stop working afte
     assert.equal(content.station.name, "Test Station");
     assert.equal(content.total, 190);
     assert.equal(content.customerName, "Customer");
+    assert.equal(bill.pdfReady, false);
     assert.deepEqual(Object.keys(content).sort(), [
       "billNo", "billedAt", "customerName", "customerGstin", "vehicleNo", "mobile", "paymentMode",
       "pumpNozzle", "attendant", "lines", "total", "station",

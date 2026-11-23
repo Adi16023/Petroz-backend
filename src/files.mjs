@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
+import { DeleteObjectCommand, GetObjectCommand, PutObjectCommand, S3Client } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 const bucket = process.env.S3_BUCKET || process.env.AWS_S3_BUCKET || "pettroz";
@@ -17,10 +17,37 @@ function storage() {
   });
 }
 
+export function storageConfigured() {
+  return Boolean(storage());
+}
+
 export async function signedUrl(key) {
   const client = storage();
   if (!client || !key) return null;
   return getSignedUrl(client, new GetObjectCommand({ Bucket: bucket, Key: key }), { expiresIn: 60 * 60 * 24 * 7 });
+}
+
+export async function putObjectBytes(key, body, contentType) {
+  const client = storage();
+  if (!client) return null;
+  await client.send(new PutObjectCommand({
+    Bucket: bucket,
+    Key: key,
+    Body: body,
+    ContentType: contentType,
+  }));
+  return key;
+}
+
+export async function deleteObject(key) {
+  if (!key) return;
+  const client = storage();
+  if (!client) return;
+  try {
+    await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key }));
+  } catch {
+    /* Object may already be gone — DB pointer is cleared separately. */
+  }
 }
 
 export function registerFiles(app, { pool, wrap, bad, assertOutlet }) {

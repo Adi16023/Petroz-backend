@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { clearBillPdfCache } from "./bill-pdf.mjs";
 import { billDto } from "./public-bills.mjs";
 import { moveShopStock } from "./stock-batches.mjs";
 import { syncDeskEquipment } from "./desk-equipment.mjs";
@@ -2094,12 +2095,17 @@ export function registerWrites(app, { pool, wrap, bad, assertOutlet }) {
   app.patch("/api/billing/:id/cancel", wrap(async (req, res) => {
     const outlet = await assertOutlet(pool, req.user, req.body?.outletId);
     if (!uuidList([req.params.id])) throw bad("Invalid bill ID.");
+    const { rows: existing } = await pool.query(
+      `SELECT id, bill_no, pdf_object_key FROM billing WHERE id = $1 AND outlet_id = $2`,
+      [req.params.id, outlet.id],
+    );
+    if (!existing.length) throw bad("Bill not found.", 404);
+    await clearBillPdfCache(pool, existing[0]);
     const { rows } = await pool.query(
-      `UPDATE billing SET cancelled_at = COALESCE(cancelled_at, now())
+      `UPDATE billing SET cancelled_at = COALESCE(cancelled_at, now()), pdf_object_key = NULL
        WHERE id = $1 AND outlet_id = $2 RETURNING *`,
       [req.params.id, outlet.id],
     );
-    if (!rows.length) throw bad("Bill not found.", 404);
     await log(req.user, outlet.id, "cancelled", `Bill ${rows[0].bill_no}`, "billing", rows[0].id);
     res.json(billDto(rows[0]));
   }));

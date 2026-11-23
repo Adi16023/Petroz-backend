@@ -16,6 +16,8 @@ export function billDto(row) {
     publicToken: row.public_token,
     cancelledAt: row.cancelled_at,
     station: row.station_snapshot,
+    /** True when an A4 PDF is cached in object storage for this bill. */
+    pdfReady: Boolean(row.pdf_object_key),
   };
 }
 
@@ -33,8 +35,8 @@ export function registerPublicBills(app, { pool, wrap, bad }) {
     );
     if (!rows.length) throw bad("Bill not found or no longer available.", 404);
     const bill = billDto(rows[0]);
-    // Public responses contain bill content only, never internal IDs or access tokens.
-    const { id, outletId, publicToken, cancelledAt, ...content } = bill;
+    // Public responses contain bill content only, never internal IDs, tokens, or cache flags.
+    const { id, outletId, publicToken, cancelledAt, pdfReady, ...content } = bill;
     res.json(content);
   }));
 }

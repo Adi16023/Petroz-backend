@@ -29,6 +29,16 @@ Run `npm run db:migrate` before deploying the updated frontend. Billing rows rec
 
 Authenticated `PATCH /api/billing/:id/cancel` with `{ "outletId": "..." }` verifies outlet access and marks the bill cancelled, revoking public access immediately. Cancellation is idempotent and recorded in activity. The frontend disables print/share/download for cancelled bills and omits them from today's sales summary. Already downloaded copies cannot be recalled.
 
+### Cached A4 bill PDFs
+
+Bills may store one cached A4 PDF in the same S3-compatible bucket as `files` (`AWS_ENDPOINT_URL_S3`, keys, etc.). Object key pattern: `{outletId}/bill-pdf/{billId}.pdf`. Postgres keeps `billing.pdf_object_key` as the pointer; `billDto` exposes `pdfReady` (boolean only).
+
+- `GET /api/billing/:id/pdf?outletId=…` (auth) → `{ ready, url, billNo }`. `ready: false` when not cached yet.
+- `PUT /api/billing/:id/pdf` (auth) with `{ outletId, data }` (base64 PDF, max 12 MB) uploads/replaces the object and sets `pdf_object_key`. Intended for a Chromium worker (or future generator); Express does not render HTML itself.
+- `GET /api/public/bills/:token/pdf` (public, before auth) → same `{ ready, url, billNo }` shape; cancelled/unknown tokens 404 like the JSON bill route.
+
+Cancel clears `pdf_object_key` and deletes the S3 object when present. Bills are not edited after create, so a bill needs at most one generate; repeat downloads are signed URL only (no Chromium, no fat SELECT).
+
 `node --test src/public-bills.test.mjs` validates migration reruns, token uniqueness, station snapshots, public response fields/headers, unauthenticated reads, protected cancellation, outlet isolation, and revocation using isolated in-memory PostgreSQL.
 
 ## Offers

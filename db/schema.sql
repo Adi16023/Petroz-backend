@@ -638,6 +638,7 @@ ALTER TABLE billing ADD COLUMN IF NOT EXISTS public_token text NOT NULL DEFAULT 
 ALTER TABLE billing ADD COLUMN IF NOT EXISTS cancelled_at timestamptz;
 ALTER TABLE billing ADD COLUMN IF NOT EXISTS station_snapshot jsonb;
 ALTER TABLE billing ADD COLUMN IF NOT EXISTS customer_gstin text;
+ALTER TABLE billing ADD COLUMN IF NOT EXISTS pdf_object_key text;
 CREATE UNIQUE INDEX IF NOT EXISTS billing_public_token_idx ON billing (public_token);
 
 UPDATE billing b SET station_snapshot = jsonb_build_object(
