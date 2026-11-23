@@ -33,11 +33,13 @@ Authenticated `PATCH /api/billing/:id/cancel` with `{ "outletId": "..." }` verif
 
 Bills may store one cached A4 PDF in the same S3-compatible bucket as `files` (`AWS_ENDPOINT_URL_S3`, keys, etc.). Object key pattern: `{outletId}/bill-pdf/{billId}.pdf`. Postgres keeps `billing.pdf_object_key` as the pointer; `billDto` exposes `pdfReady` (boolean only).
 
-- `GET /api/billing/:id/pdf?outletId=…` (auth) → `{ ready, url, billNo }`. `ready: false` when not cached yet.
-- `PUT /api/billing/:id/pdf` (auth) with `{ outletId, data }` (base64 PDF, max 12 MB) uploads/replaces the object and sets `pdf_object_key`. Intended for a Chromium worker (or future generator); Express does not render HTML itself.
-- `GET /api/public/bills/:token/pdf` (public, before auth) → same `{ ready, url, billNo }` shape; cancelled/unknown tokens 404 like the JSON bill route.
+**Generate (Chromium):** on cache miss, `GET …/pdf` (default `generate=1`) launches Puppeteer, opens `{FRONTEND_URL}/bill/{publicToken}`, prints A4 with backgrounds, uploads to S3, then returns a signed URL. Set `FRONTEND_URL` (desk/app origin) and S3 env vars. Optional `PUPPETEER_EXECUTABLE_PATH` if the host needs a system Chrome. Pass `generate=0` to only check the cache. Concurrent requests for the same bill share one in-flight render.
 
-Cancel clears `pdf_object_key` and deletes the S3 object when present. Bills are not edited after create, so a bill needs at most one generate; repeat downloads are signed URL only (no Chromium, no fat SELECT).
+- `GET /api/billing/:id/pdf?outletId=…` (auth) → `{ ready, url, billNo, cached? }`
+- `PUT /api/billing/:id/pdf` (auth) with `{ outletId, data }` (base64 PDF, max 12 MB) uploads/replaces without Chromium
+- `GET /api/public/bills/:token/pdf` (public) → same shape; cancelled/unknown tokens 404
+
+Cancel clears `pdf_object_key` and deletes the S3 object. After the first successful generate, later downloads are signed URL only.
 
 `node --test src/public-bills.test.mjs` validates migration reruns, token uniqueness, station snapshots, public response fields/headers, unauthenticated reads, protected cancellation, outlet isolation, and revocation using isolated in-memory PostgreSQL.
 

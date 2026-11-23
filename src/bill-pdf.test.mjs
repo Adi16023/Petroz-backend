@@ -86,11 +86,11 @@ test("bill PDF cache pointer, public readiness, and cancel clear the key", async
     const { bill } = await saved.json();
     assert.equal(bill.pdfReady, false);
 
-    const missing = await request(`/api/billing/${bill.id}/pdf?outletId=${outletId}`);
+    const missing = await request(`/api/billing/${bill.id}/pdf?outletId=${outletId}&generate=0`);
     assert.equal(missing.status, 200);
     assert.deepEqual(await missing.json(), { ready: false, url: null, billNo: bill.billNo });
 
-    const publicMissing = await request(`/api/public/bills/${bill.publicToken}/pdf`, { auth: false });
+    const publicMissing = await request(`/api/public/bills/${bill.publicToken}/pdf?generate=0`, { auth: false });
     assert.equal(publicMissing.status, 200);
     assert.equal((await publicMissing.json()).ready, false);
 

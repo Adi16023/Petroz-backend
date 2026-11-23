@@ -23,34 +23,53 @@ function pdfBufferFromBody(raw) {
   return Buffer.from(payload, "base64");
 }
 
+function wantGenerate(query) {
+  const raw = String(query?.generate ?? "1").toLowerCase();
+  return raw !== "0" && raw !== "false" && raw !== "no";
+}
+
 /**
- * Authenticated bill PDF cache:
- * - GET  /api/billing/:id/pdf?outletId=…  → { ready, url, billNo }
- * - PUT  /api/billing/:id/pdf             → store PDF bytes (worker / future Chromium), { ready, url }
+ * Authenticated bill PDF cache + Chromium generate-on-miss:
+ * - GET  /api/billing/:id/pdf?outletId=…&generate=1  → { ready, url, billNo, cached? }
+ * - PUT  /api/billing/:id/pdf                        → store PDF bytes manually
  *
  * Public:
- * - GET /api/public/bills/:token/pdf      → { ready, url, billNo } (404 if cancelled / unknown)
+ * - GET /api/public/bills/:token/pdf?generate=1      → same (generate allowed; token is the secret)
  */
 export function registerBillPdf(app, { pool, wrap, bad, assertOutlet }) {
   app.get("/api/billing/:id/pdf", wrap(async (req, res) => {
     const outlet = await assertOutlet(pool, req.user, req.query.outletId);
     if (!UUID_RE.test(req.params.id)) throw bad("Invalid bill ID.");
     const { rows } = await pool.query(
-      `SELECT id, outlet_id, bill_no, cancelled_at, pdf_object_key
+      `SELECT id, outlet_id, bill_no, public_token, cancelled_at, pdf_object_key
        FROM billing WHERE id = $1 AND outlet_id = $2`,
       [req.params.id, outlet.id],
     );
     const row = rows[0];
     if (!row) throw bad("Bill not found.", 404);
     if (row.cancelled_at) throw bad("Bill not found or no longer available.", 404);
-    if (!row.pdf_object_key) {
+
+    if (row.pdf_object_key) {
+      if (!storageConfigured()) throw bad("File storage is not configured.", 503);
+      const url = await signedUrl(row.pdf_object_key);
+      if (!url) throw bad("File storage is not configured.", 503);
+      res.json({ ready: true, url, billNo: row.bill_no, cached: true });
+      return;
+    }
+
+    if (!wantGenerate(req.query)) {
       res.json({ ready: false, url: null, billNo: row.bill_no });
       return;
     }
-    if (!storageConfigured()) throw bad("File storage is not configured.", 503);
-    const url = await signedUrl(row.pdf_object_key);
-    if (!url) throw bad("File storage is not configured.", 503);
-    res.json({ ready: true, url, billNo: row.bill_no });
+
+    try {
+      const { ensureBillPdfCached } = await import("./bill-pdf-render.mjs");
+      const result = await ensureBillPdfCached(pool, row);
+      res.json(result);
+    } catch (error) {
+      const status = error?.status || 500;
+      throw bad(error?.message || "Could not generate PDF.", status);
+    }
   }));
 
   app.put("/api/billing/:id/pdf", wrap(async (req, res) => {
@@ -70,7 +89,6 @@ export function registerBillPdf(app, { pool, wrap, bad, assertOutlet }) {
     const body = pdfBufferFromBody(req.body?.data);
     if (!body.length) throw bad("PDF data is required.");
     if (body.length > MAX_PDF_BYTES) throw bad("PDF must be 12 MB or smaller.");
-    // %PDF magic
     if (body[0] !== 0x25 || body[1] !== 0x50 || body[2] !== 0x44 || body[3] !== 0x46) {
       throw bad("Upload a PDF file.");
     }
@@ -80,7 +98,7 @@ export function registerBillPdf(app, { pool, wrap, bad, assertOutlet }) {
     await putObjectBytes(key, body, "application/pdf");
     await pool.query(`UPDATE billing SET pdf_object_key = $2 WHERE id = $1`, [row.id, key]);
     const url = await signedUrl(key);
-    res.json({ ready: true, url, billNo: row.bill_no });
+    res.json({ ready: true, url, billNo: row.bill_no, cached: false });
   }));
 }
 
@@ -91,19 +109,33 @@ export function registerPublicBillPdf(app, { pool, wrap, bad }) {
     res.set("Referrer-Policy", "no-referrer");
     if (!/^[a-f0-9]{64}$/.test(req.params.token)) throw bad("Bill not found or no longer available.", 404);
     const { rows } = await pool.query(
-      `SELECT id, bill_no, cancelled_at, pdf_object_key
+      `SELECT id, outlet_id, bill_no, public_token, cancelled_at, pdf_object_key
        FROM billing WHERE public_token = $1 AND cancelled_at IS NULL`,
       [req.params.token],
     );
     const row = rows[0];
     if (!row) throw bad("Bill not found or no longer available.", 404);
-    if (!row.pdf_object_key) {
+
+    if (row.pdf_object_key) {
+      if (!storageConfigured()) throw bad("File storage is not configured.", 503);
+      const url = await signedUrl(row.pdf_object_key);
+      if (!url) throw bad("File storage is not configured.", 503);
+      res.json({ ready: true, url, billNo: row.bill_no, cached: true });
+      return;
+    }
+
+    if (!wantGenerate(req.query)) {
       res.json({ ready: false, url: null, billNo: row.bill_no });
       return;
     }
-    if (!storageConfigured()) throw bad("File storage is not configured.", 503);
-    const url = await signedUrl(row.pdf_object_key);
-    if (!url) throw bad("File storage is not configured.", 503);
-    res.json({ ready: true, url, billNo: row.bill_no });
+
+    try {
+      const { ensureBillPdfCached } = await import("./bill-pdf-render.mjs");
+      const result = await ensureBillPdfCached(pool, row);
+      res.json(result);
+    } catch (error) {
+      const status = error?.status || 500;
+      throw bad(error?.message || "Could not generate PDF.", status);
+    }
   }));
 }
