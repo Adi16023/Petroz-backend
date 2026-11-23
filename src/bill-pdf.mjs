@@ -67,7 +67,8 @@ export function registerBillPdf(app, { pool, wrap, bad, assertOutlet }) {
       const result = await ensureBillPdfCached(pool, row);
       res.json(result);
     } catch (error) {
-      const status = error?.status || 500;
+      // Use 503 so the real message is returned (500s are masked as "Something went wrong.").
+      const status = error?.status && error.status !== 500 ? error.status : 503;
       throw bad(error?.message || "Could not generate PDF.", status);
     }
   }));
@@ -134,7 +135,7 @@ export function registerPublicBillPdf(app, { pool, wrap, bad }) {
       const result = await ensureBillPdfCached(pool, row);
       res.json(result);
     } catch (error) {
-      const status = error?.status || 500;
+      const status = error?.status && error.status !== 500 ? error.status : 503;
       throw bad(error?.message || "Could not generate PDF.", status);
     }
   }));
