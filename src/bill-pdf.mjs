@@ -3,7 +3,7 @@ import { deleteObject, getObjectBytes, putObjectBytes, storageConfigured } from 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const MAX_PDF_BYTES = 12 * 1024 * 1024;
 /** Bump when print CSS changes so old cached PDFs (e.g. blank page 2) are regenerated. */
-const PDF_CACHE_VERSION = "v2";
+const PDF_CACHE_VERSION = "v3";
 
 export function billPdfObjectKey(outletId, billId) {
   return `${outletId}/bill-pdf/${PDF_CACHE_VERSION}/${billId}.pdf`;

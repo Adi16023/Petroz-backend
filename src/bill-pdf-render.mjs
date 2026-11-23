@@ -89,44 +89,54 @@ export async function renderBillPdfBytes(publicToken) {
       throw fail(`Bill page loaded but invoice layout was missing (${url}).`, 503);
     }
 
-    // Match desk Print A4: hide chrome, collapse min-height so Chromium does not emit a blank 2nd page.
+    // Isolate the invoice node so chrome / 100dvh wrappers cannot force a blank 2nd page.
+    const metrics = await page.evaluate(() => {
+      const bill = document.querySelector(".public-bill");
+      if (!bill) return null;
+      const clone = bill.cloneNode(true);
+      document.documentElement.style.cssText = "margin:0;padding:0;background:#fff;height:auto;min-height:0;overflow:hidden;";
+      document.body.style.cssText = "margin:0;padding:0;background:#fff;height:auto;min-height:0;overflow:hidden;";
+      document.body.replaceChildren(clone);
+      const node = document.querySelector(".public-bill");
+      if (!node) return null;
+      node.style.cssText = [
+        "margin:0",
+        "box-shadow:none",
+        "min-height:0",
+        "height:auto",
+        "max-width:210mm",
+        "width:210mm",
+        "padding:12mm",
+        "background:#fff",
+        "page-break-after:avoid",
+        "break-after:avoid",
+      ].join(";");
+      // Drop mobile-only QR duplicate so it cannot inflate height in print.
+      node.querySelectorAll('[data-bill-qr="mobile"]').forEach((el) => el.remove());
+      const rect = node.getBoundingClientRect();
+      return { width: Math.ceil(rect.width), height: Math.ceil(rect.height) };
+    });
+    if (!metrics?.height) throw fail(`Bill page loaded but invoice layout was missing (${url}).`, 503);
+
     await page.addStyleTag({
       content: `
         @page { size: A4; margin: 0; }
-        .print\\:hidden, [class*="print:hidden"] { display: none !important; }
-        html, body {
-          margin: 0 !important;
-          padding: 0 !important;
-          background: #fff !important;
-          height: auto !important;
-          min-height: 0 !important;
-          overflow: hidden !important;
-        }
-        main, main > div {
-          margin: 0 !important;
-          padding: 0 !important;
-          min-height: 0 !important;
-          height: auto !important;
-          overflow: visible !important;
-          background: #fff !important;
-        }
-        .public-bill {
-          margin: 0 auto !important;
-          box-shadow: none !important;
-          min-height: 0 !important;
-          height: auto !important;
-          max-height: none !important;
-          page-break-after: avoid !important;
-          break-after: avoid !important;
-        }
+        html, body { margin: 0 !important; padding: 0 !important; background: #fff !important; }
+        .public-bill { page-break-after: avoid !important; break-after: avoid !important; }
       `,
     });
 
+    // ~A4 height at 96dpi. Fit content on one page when it is shorter than A4.
+    const a4HeightPx = Math.round((297 * 96) / 25.4);
+    const fitsOnePage = metrics.height <= a4HeightPx + 2;
     const bytes = await page.pdf({
-      format: "A4",
+      width: "210mm",
+      height: fitsOnePage ? "297mm" : undefined,
+      format: fitsOnePage ? undefined : "A4",
       printBackground: true,
       preferCSSPageSize: false,
       margin: { top: "0", right: "0", bottom: "0", left: "0" },
+      ...(fitsOnePage ? { pageRanges: "1" } : {}),
     });
     return Buffer.from(bytes);
   } finally {
